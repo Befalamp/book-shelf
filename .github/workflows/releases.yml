@@ -1,0 +1,25 @@
+name: Release Radar
+
+on:
+  schedule:
+    # 07:00 UTC daily. GitHub cron is UTC; adjust if you like.
+    - cron: '0 7 * * *'
+  workflow_dispatch:   # lets you run it manually from the Actions tab
+
+jobs:
+  check-releases:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run release checker
+        env:
+          HARDCOVER_TOKEN: ${{ secrets.HARDCOVER_TOKEN }}
+          FIREBASE_DB_URL: ${{ secrets.FIREBASE_DB_URL }}
+        run: node check-releases.js

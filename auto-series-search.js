@@ -117,7 +117,7 @@ function coverFromHit(doc) {
     // cover
     if (!(b.cover && b.cover.trim())) {
       const cov = coverFromHit(doc);
-      if (cov) patch.cover = cov;
+      if (cov) { patch.cover = cov; if (b.coverCleared) patch.coverCleared = null; }
     }
 
     if (!Object.keys(patch).length) continue;

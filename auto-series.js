@@ -89,7 +89,7 @@ const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim
   // process any book missing a series OR missing a cover
   const entries = Object.entries(booksRaw).filter(([id, b]) => {
     const needsSeries = !(b.series && b.series.trim());
-    const needsCover = !(b.cover && b.cover.trim());
+    const needsCover = !(b.cover && b.cover.trim()) || b.cover.includes('od-cdn.com');
     if (!needsSeries && !needsCover) return false;
     return true;
   });
@@ -127,8 +127,8 @@ const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim
       }
     }
 
-    // cover (only if we don't already have one)
-    if (!(b.cover && b.cover.trim())) {
+    // cover (if empty or a dead od-cdn URL)
+    if (!(b.cover && b.cover.trim()) || b.cover.includes('od-cdn.com')) {
       const cov = coverFrom(chosen);
       if (cov) { patch.cover = cov; if (b.coverCleared) patch.coverCleared = null; }
     }

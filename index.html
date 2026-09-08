@@ -442,7 +442,13 @@ function renderBooks(){
         return (a.title).localeCompare(b.title);
       });
       const collapsed = collapsedGroups.has(g);
-      const head=`<div class="group-h ${collapsed?'collapsed':''}" data-group="${esc(g)}"><span class="caret">▾</span>${esc(g)}<span class="c">${items.length} book${items.length>1?'s':''}</span></div>`;
+      // for series view, show the author (from the first book) alongside the count
+      let sub = `${items.length} book${items.length>1?'s':''}`;
+      if(key==="series" && g!=="— Standalone —"){
+        const auth=(items[0].author||'').split(',')[0].trim();
+        if(auth) sub = `${esc(auth)} &middot; ${sub}`;
+      }
+      const head=`<div class="group-h ${collapsed?'collapsed':''}" data-group="${esc(g)}"><span class="caret">▾</span>${esc(g)}<span class="c">${sub}</span></div>`;
       return head + (collapsed ? '' : items.map(card).join(''));
     }).join('');
     // wire collapse toggles

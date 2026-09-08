@@ -50,6 +50,18 @@ async function hardcover(query, variables) {
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
+// Generate name variants to catch punctuation mismatches:
+// "LJ Ross" -> also try "L.J. Ross"; "M.J. Arlidge" -> also try "MJ Arlidge".
+function nameVariants(name) {
+  const variants = new Set([name]);
+  // "LJ Ross" or "JD Kirk" -> insert dots: "L.J. Ross"
+  variants.add(name.replace(/\b([A-Z])([A-Z])\b/g, '$1.$2.'));
+  // "L.J. Ross" -> strip dots: "LJ Ross"
+  variants.add(name.replace(/\./g, ''));
+  // collapse any double spaces from the strip
+  return [...variants].map(v => v.replace(/\s+/g, ' ').trim()).filter(Boolean);
+}
+
 // slugify a title+author into a stable Firebase key (no ./#/$/[/]/ chars)
 function keyFor(title, author) {
   return (author + '_' + title).toLowerCase()
@@ -112,14 +124,26 @@ query Upcoming($name: String!, $today: date!) {
   }
   console.log(`Checking ${authors.length} authors for upcoming releases...`);
 
+  // load user's dismissed releases so we don't re-add them
+  const dismissedRaw = await fbGet('dismissedReleases');
+  const dismissed = new Set(dismissedRaw ? Object.keys(dismissedRaw) : []);
+
   const releases = {};
   for (const name of authors) {
-    const data = await hardcover(UPCOMING_QUERY, { name, today });
-    if (!data || !data.books) { await sleep(1100); continue; }
-    for (const b of data.books) {
+    let books = null;
+    // try each name variant until one returns results (catches L.J. vs LJ etc.)
+    for (const variant of nameVariants(name)) {
+      const data = await hardcover(UPCOMING_QUERY, { name: variant, today });
+      await sleep(1100); // pace between calls
+      if (data && data.books && data.books.length) { books = data.books; break; }
+      if (data && data.books) books = data.books; // keep empty result as fallback
+    }
+    if (!books) continue;
+    for (const b of books) {
       if (!b.release_date) continue;
       const author = (b.contributions && b.contributions[0] && b.contributions[0].author && b.contributions[0].author.name) || name;
       const k = keyFor(b.title, author);
+      if (dismissed.has(k)) continue;  // user hid this one
       releases[k] = {
         title: b.title,
         author,
@@ -129,8 +153,7 @@ query Upcoming($name: String!, $today: date!) {
         checkedAt: today
       };
     }
-    console.log(`  ${name}: ${data.books.length} upcoming`);
-    await sleep(1100); // stay well under 60/min
+    console.log(`  ${name}: ${books.length} upcoming`);
   }
 
   // 2. write the whole releases node (replace — it's derived data, safe to overwrite)

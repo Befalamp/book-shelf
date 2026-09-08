@@ -1,0 +1,20 @@
+name: Auto Series
+
+on:
+  workflow_dispatch:   # run manually from the Actions tab
+  schedule:
+    - cron: '30 7 * * 1'   # also weekly on Mondays, to catch newly-added books
+
+jobs:
+  auto-series:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Fill in series
+        env:
+          HARDCOVER_TOKEN: ${{ secrets.HARDCOVER_TOKEN }}
+          FIREBASE_DB_URL: ${{ secrets.FIREBASE_DB_URL }}
+        run: node auto-series.js

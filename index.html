@@ -629,25 +629,39 @@ async function toggleStatus(id){
   }catch(e){console.error(e);toast("Couldn't update — try again");}
 }
 
-// fill in any missing covers via Google Books (runs in browser, saves back to Firebase)
+// fill in any missing covers via Google Books (paced to avoid 429 rate-limiting).
+// Heals a few per load, saves each to Firebase, so it resumes across reloads.
+let healingCovers=false;
 async function healCovers(){
+  if(healingCovers) return;
+  healingCovers=true;
   const missing=books.filter(b=>!b.cover);
+  let consecutive429=0;
   for(const b of missing){
     try{
       const q=encodeURIComponent(b.title+' '+(b.author||'').split(',')[0]);
       const res=await fetch('https://www.googleapis.com/books/v1/volumes?maxResults=1&q='+q);
+      if(res.status===429){
+        consecutive429++;
+        // back off hard: wait longer each time, and bail after several in a row
+        await new Promise(r=>setTimeout(r,3000*consecutive429));
+        if(consecutive429>=4) break;   // give up this session; resumes next reload
+        continue;
+      }
+      consecutive429=0;
       const data=await res.json();
       const v=data.items&&data.items[0]&&data.items[0].volumeInfo;
       const img=v&&v.imageLinks&&(v.imageLinks.thumbnail||v.imageLinks.smallThumbnail);
-      if(!img)continue;
+      if(!img){ await new Promise(r=>setTimeout(r,1500)); continue; }
       const cover=img.replace('http://','https://').replace('&edge=curl','');
       await fetch(DB+'/books/'+b.id+'.json',{method:'PATCH',
         headers:{'Content-Type':'application/json'},body:JSON.stringify({cover})});
       b.cover=cover;
-      renderBooks();               // repaint as each one lands
-      await new Promise(r=>setTimeout(r,140));
-    }catch(e){/* skip on error */}
+      renderBooks();
+      await new Promise(r=>setTimeout(r,1600));  // ~1.6s between lookups, well under the limit
+    }catch(e){ await new Promise(r=>setTimeout(r,1500)); }
   }
+  healingCovers=false;
 }
 
 // fill in series + number from the built-in map, save back to Firebase

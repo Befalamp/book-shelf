@@ -86,6 +86,19 @@ const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim
     return '';
   }
 
+  // Google Books fallback for covers Hardcover doesn't have
+  async function googleCover(title, author) {
+    try {
+      const q = encodeURIComponent(`${title} ${(author||'').split(',')[0]}`);
+      const res = await fetch(`https://www.googleapis.com/books/v1/volumes?maxResults=1&q=${q}`);
+      if (!res.ok) return '';
+      const data = await res.json();
+      const v = data.items && data.items[0] && data.items[0].volumeInfo;
+      const img = v && v.imageLinks && (v.imageLinks.thumbnail || v.imageLinks.smallThumbnail);
+      return img ? img.replace('http://','https://').replace('&edge=curl','') : '';
+    } catch (e) { return ''; }
+  }
+
   // process any book missing a series OR missing a cover
   const entries = Object.entries(booksRaw).filter(([id, b]) => {
     const needsSeries = !(b.series && b.series.trim());
@@ -129,7 +142,9 @@ const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim
 
     // cover (if empty or a dead od-cdn URL)
     if (!(b.cover && b.cover.trim()) || b.cover.includes('od-cdn.com')) {
-      const cov = coverFrom(chosen);
+      let cov = coverFrom(chosen);
+      // fallback: Google Books server-side (different IP from browser, fresh rate limit)
+      if (!cov) { cov = await googleCover(b.title, b.author); await sleep(1100); }
       if (cov) { patch.cover = cov; if (b.coverCleared) patch.coverCleared = null; }
     }
 

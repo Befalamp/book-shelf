@@ -1,0 +1,20 @@
+name: Catch Up
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 8 * * 1'   # weekly, Monday, after the other syncs
+
+jobs:
+  catchup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Find catch-up books
+        env:
+          HARDCOVER_TOKEN: ${{ secrets.HARDCOVER_TOKEN }}
+          FIREBASE_DB_URL: ${{ secrets.FIREBASE_DB_URL }}
+        run: node catchup.js

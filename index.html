@@ -179,6 +179,11 @@
   .group-h:hover{color:var(--gilt)}
   .group-h:not(:first-child){margin-top:1.4rem}
   .group-h .c{font-family:'Inter',sans-serif;font-size:.75rem;color:var(--paper-dim);font-weight:500}
+  .cubadge{
+    display:inline-block;background:rgba(192,122,110,.15);color:var(--rose);
+    font-size:.68rem;font-weight:600;padding:.15rem .45rem;border-radius:10px;
+    margin-left:.4rem;vertical-align:middle;
+  }
   .group-h::after{content:"";flex:1;height:1px;background:linear-gradient(90deg,var(--edge),transparent)}
   .empty{text-align:center;color:var(--paper-dim);padding:3rem 1rem;font-family:'Fraunces',serif;font-style:italic}
 
@@ -291,6 +296,22 @@
   <section class="view" id="catchup">
     <div class="bar">
       <div class="count"><b id="cn">0</b> to catch up on</div>
+      <button class="addbtn" id="addcatchup">+ Add manually</button>
+    </div>
+    <div id="catchupform" style="display:none;background:var(--ink-soft);border:1px solid var(--edge);border-radius:12px;padding:1.1rem;margin-bottom:1.4rem">
+      <div style="font-family:'Fraunces',serif;font-size:1.05rem;margin-bottom:.8rem">Add a book to catch up on</div>
+      <div class="row2">
+        <div class="field"><label>Title</label><input id="cu-title" type="text" autocomplete="off"></div>
+        <div class="field"><label>Author</label><input id="cu-author" type="text" autocomplete="off"></div>
+      </div>
+      <div class="row2">
+        <div class="field"><label>Series</label><input id="cu-series" type="text" autocomplete="off"></div>
+        <div class="field"><label>Number in series</label><input id="cu-num" type="number" min="1" autocomplete="off"></div>
+      </div>
+      <div class="actions">
+        <button class="btn-cancel" id="cu-cancel">Cancel</button>
+        <button class="btn-save" id="cu-save">Add to Catch Up</button>
+      </div>
     </div>
     <div class="grid" id="catchupgrid"></div>
   </section>
@@ -456,6 +477,10 @@ function renderBooks(){
     });
     const names=Object.keys(buckets).sort((a,b)=>{
       if(a==="— Standalone —")return 1; if(b==="— Standalone —")return -1;
+      // series with catch-up books sort first
+      const aCu=catchup.filter(c=>(c.series||'')===a).length;
+      const bCu=catchup.filter(c=>(c.series||'')===b).length;
+      if(aCu && !bCu) return -1; if(!aCu && bCu) return 1;
       return a.localeCompare(b);
     });
     grid.innerHTML = names.map(g=>{
@@ -472,6 +497,9 @@ function renderBooks(){
       if(key==="series" && g!=="— Standalone —"){
         const auth=(items[0].author||'').split(',')[0].trim();
         if(auth) sub = `${esc(auth)} &middot; ${sub}`;
+        // show catch-up count if there are books waiting
+        const cuCount=catchup.filter(c=>(c.series||'')===g).length;
+        if(cuCount) sub += ` <span class="cubadge">+${cuCount} to read</span>`;
       }
       const head=`<div class="group-h ${collapsed?'collapsed':''}" data-group="${esc(g)}"><span class="caret">▾</span>${esc(g)}<span class="c">${sub}</span></div>`;
       return head + (collapsed ? '' : items.map(card).join(''));
@@ -590,6 +618,31 @@ document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{
   document.getElementById(t.dataset.v).classList.add('on');
   if(t.dataset.v==='radar') loadAuthors();   // refresh follow list when opening radar
 });
+
+// catch-up manual add
+document.getElementById('addcatchup').onclick=()=>{
+  const f=document.getElementById('catchupform');
+  f.style.display=f.style.display==='none'?'block':'none';
+};
+document.getElementById('cu-cancel').onclick=()=>{document.getElementById('catchupform').style.display='none';};
+document.getElementById('cu-save').onclick=async()=>{
+  const title=document.getElementById('cu-title').value.trim();
+  const author=document.getElementById('cu-author').value.trim();
+  const series=document.getElementById('cu-series').value.trim();
+  const num=parseInt(document.getElementById('cu-num').value)||null;
+  if(!title){document.getElementById('cu-title').focus();return;}
+  const rec={title,author,series,seriesNum:num,slug:'',cover:'',releaseDate:''};
+  try{
+    const res=await fetch(DB+'/catchup.json',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(rec)});
+    if(!res.ok)throw new Error('HTTP '+res.status);
+    const {name}=await res.json();
+    catchup.push({id:name,...rec});
+    renderCatchup();
+    document.getElementById('catchupform').style.display='none';
+    ['cu-title','cu-author','cu-series','cu-num'].forEach(id=>{document.getElementById(id).value='';});
+    toast('Added to Catch Up');
+  }catch(e){console.error(e);toast("Couldn't add");}
+};
 
 // author manage panel
 document.getElementById('managebtn').onclick=()=>{

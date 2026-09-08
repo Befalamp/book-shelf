@@ -1,0 +1,18 @@
+name: Auto Series Search
+
+on:
+  workflow_dispatch:   # run manually — this is the typo-tolerant second pass
+
+jobs:
+  auto-series-search:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Search-fill series and covers
+        env:
+          HARDCOVER_TOKEN: ${{ secrets.HARDCOVER_TOKEN }}
+          FIREBASE_DB_URL: ${{ secrets.FIREBASE_DB_URL }}
+        run: node auto-series-search.js

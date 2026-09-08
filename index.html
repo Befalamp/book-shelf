@@ -81,7 +81,7 @@
 
   .grid{
     display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));
-    gap:1.4rem 1.1rem;
+    gap:1.8rem 1.1rem;align-items:start;
   }
   .book{cursor:default}
   .cover{
@@ -109,8 +109,16 @@
   .fmt.audio{color:var(--plum)}
   .fmt.print{color:var(--sage)}
   .meta{padding:.6rem .1rem 0}
-  .meta .t{font-family:'Fraunces',serif;font-size:.98rem;line-height:1.15;font-weight:500}
-  .meta .a{font-size:.78rem;color:var(--paper-dim);margin-top:.15rem}
+  .meta .t{
+    font-family:'Fraunces',serif;font-size:.98rem;line-height:1.28;font-weight:500;
+    min-height:2.56em;                /* 2 lines at 1.28 */
+    display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
+  }
+  .meta .a{
+    font-size:.78rem;color:var(--paper-dim);margin-top:.25rem;line-height:1.35;
+    min-height:1.35em;                /* 1 line, keeps buttons level when authors wrap differently */
+    display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden;
+  }
   .meta .stars{color:var(--gilt);font-size:.8rem;margin-top:.25rem;letter-spacing:.05em}
   .meta .snum{
     display:inline-block;font-size:.7rem;font-weight:600;color:var(--gilt);
@@ -120,6 +128,7 @@
   .statusbtn{
     margin-top:.35rem;width:100%;font-family:'Inter',sans-serif;font-size:.72rem;font-weight:600;
     padding:.32rem;border-radius:6px;cursor:pointer;transition:.15s;border:1px solid;
+    white-space:nowrap;
   }
   .statusbtn.reading{background:transparent;border-color:var(--gilt);color:var(--gilt-soft)}
   .statusbtn.reading:hover{background:var(--gilt);color:var(--ink)}
@@ -216,12 +225,22 @@
   }
   .cover:hover .del{display:flex}
   .toast{
-    position:fixed;bottom:1.4rem;left:50%;transform:translateX(-50%) translateY(120%);
+    position:fixed;bottom:2rem;left:50%;transform:translateX(-50%) translateY(160%);
     background:var(--sage);color:var(--ink);font-weight:600;font-size:.86rem;
     padding:.7rem 1.2rem;border-radius:24px;transition:.3s;z-index:60;
+    max-width:90vw;text-align:center;box-shadow:0 8px 24px -6px rgba(0,0,0,.6);
   }
   .toast.show{transform:translateX(-50%) translateY(0)}
   .loading{text-align:center;color:var(--paper-dim);padding:3rem;font-family:'Fraunces',serif;font-style:italic}
+  .chip{
+    display:inline-flex;align-items:center;gap:.4rem;background:var(--card);border:1px solid var(--edge);
+    border-radius:20px;padding:.35rem .5rem .35rem .8rem;margin:0 .4rem .5rem 0;font-size:.82rem;
+  }
+  .chip button{
+    background:var(--edge);color:var(--paper);border:none;border-radius:50%;width:18px;height:18px;
+    cursor:pointer;font-size:.85rem;line-height:1;display:flex;align-items:center;justify-content:center;
+  }
+  .chip button:hover{background:var(--rose);color:var(--ink)}
 </style>
 </head>
 <body>
@@ -254,6 +273,17 @@
   <section class="view" id="radar">
     <div class="bar">
       <div class="count"><b id="rn">0</b> upcoming</div>
+      <button class="addbtn" id="managebtn" style="background:var(--ink-soft);border-color:var(--edge);color:var(--paper)">Authors (<span id="authorcount">0</span>)</button>
+    </div>
+    <div id="authorpanel" style="display:none;background:var(--ink-soft);border:1px solid var(--edge);border-radius:12px;padding:1.1rem;margin-bottom:1.4rem">
+      <div style="font-family:'Fraunces',serif;font-size:1.05rem;margin-bottom:.3rem">Authors you follow</div>
+      <div class="hint" style="color:var(--paper-dim);font-size:.82rem;margin-bottom:.9rem">New releases from these authors appear in your radar. Seeded from your shelf — add or remove any.</div>
+      <div style="display:flex;gap:.5rem;margin-bottom:1rem">
+        <input id="authorinput" type="text" placeholder="Add an author…" autocomplete="off"
+          style="flex:1;background:var(--ink);border:1px solid var(--edge);color:var(--paper);font-family:'Inter',sans-serif;font-size:.88rem;padding:.55rem .7rem;border-radius:8px">
+        <button id="authoradd" class="addbtn">Add</button>
+      </div>
+      <div id="authorlist"></div>
     </div>
     <div id="rellist"></div>
   </section>
@@ -347,6 +377,7 @@ async function load(){
   renderBooks();
   renderReleases();
   await importLibby();  // one-time bulk import of Libby history (finish before healing)
+  seedAuthors();  // seed followed-authors from shelf (once)
   healSeries();   // assign series + numbers from the map
   healCovers();   // fill any missing covers from the browser
 }
@@ -363,11 +394,9 @@ function card(b){
         ${reading?`<span class="rdg">READING</span>`:`<span class="fin" title="Finished">✓</span>`}
       </div>
       <div class="meta">
-        <div class="t">${num}${esc(b.title)}</div>
+        <div class="t" title="${esc(b.title)}">${num}${esc(b.title)}</div>
         <div class="a">${esc(b.author)}</div>
-        <button class="statusbtn ${reading?'reading':'done'}" data-toggle="${b.id}">
-          ${reading?'Mark finished':'✓ Finished'}
-        </button>
+        <button class="statusbtn ${reading?'reading':'done'}" data-toggle="${b.id}">${reading?'Mark finished':'✓ Finished'}</button>
       </div>
     </div>`;
 }
@@ -420,11 +449,14 @@ function renderReleases(){
     const dt=new Date(r.date+"T00:00:00");
     const days=Math.ceil((dt-now)/86400000);
     const away = days<=0?"out now":days<=30?`${days} days`:`${Math.round(days/30)} months`;
-    return `<div class="rel ${days<=30?'soon':''}">
+    const inner=`<div class="rel ${days<=30?'soon':''}">
       <div class="date"><div class="d">${dt.getDate()}</div><div class="m">${MONTHS[dt.getMonth()]}</div></div>
       <div class="info"><div class="t">${esc(r.title)}</div><div class="a">${esc(r.author)}</div></div>
       <div class="away">${away}<br><span style="opacity:.6">${dt.getFullYear()}</span></div>
     </div>`;
+    return r.slug
+      ? `<a href="https://hardcover.app/books/${esc(r.slug)}" target="_blank" style="text-decoration:none;color:inherit">${inner}</a>`
+      : inner;
   }).join('');
 }
 
@@ -434,6 +466,20 @@ document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{
   document.querySelectorAll('.view').forEach(x=>x.classList.remove('on'));
   t.classList.add('on');
   document.getElementById(t.dataset.v).classList.add('on');
+  if(t.dataset.v==='radar') loadAuthors();   // refresh follow list when opening radar
+});
+
+// author manage panel
+document.getElementById('managebtn').onclick=()=>{
+  const p=document.getElementById('authorpanel');
+  p.style.display = p.style.display==='none' ? 'block' : 'none';
+};
+document.getElementById('authoradd').onclick=()=>{
+  const inp=document.getElementById('authorinput');
+  followAuthor(inp.value); inp.value='';
+};
+document.getElementById('authorinput').addEventListener('keydown',e=>{
+  if(e.key==='Enter'){ followAuthor(e.target.value); e.target.value=''; }
 });
 sortSel.onchange=renderBooks;
 
@@ -592,6 +638,61 @@ async function importLibby(){
   // set the flag so this never runs again
   try{ await fetch(DB+'/flags/'+LIBBY_FLAG+'.json',{method:'PUT',headers:{'Content-Type':'application/json'},body:'true'}); }catch(e){}
   toast(`Added ${added} books from Libby`);
+}
+
+// seed followedAuthors from the shelf, once (hybrid: auto-seed, user edits after)
+async function seedAuthors(){
+  try{
+    const flag = await (await fetch(DB+'/flags/authors_seeded_v1.json')).json();
+    if(flag===true) return;
+  }catch(e){}
+  // unique authors from shelf, split multi-author strings on comma
+  const set=new Set();
+  books.forEach(b=>String(b.author||'').split(',').forEach(a=>{a=a.trim();if(a)set.add(a);}));
+  const obj={};
+  [...set].forEach((a,i)=>obj['a'+i]=a);
+  try{
+    await fetch(DB+'/followedAuthors.json',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(obj)});
+    await fetch(DB+'/flags/authors_seeded_v1.json',{method:'PUT',headers:{'Content-Type':'application/json'},body:'true'});
+  }catch(e){}
+}
+
+// load followed authors into the manage panel
+let followedAuthors={};  // {key: name}
+async function loadAuthors(){
+  try{
+    const d=await (await fetch(DB+'/followedAuthors.json')).json();
+    followedAuthors = d && typeof d==='object' ? d : {};
+  }catch(e){ followedAuthors={}; }
+  renderAuthors();
+}
+function renderAuthors(){
+  const box=document.getElementById('authorlist');
+  if(!box) return;
+  const entries=Object.entries(followedAuthors).sort((a,b)=>a[1].localeCompare(b[1]));
+  document.getElementById('authorcount').textContent=entries.length;
+  box.innerHTML = entries.length
+    ? entries.map(([k,name])=>`<span class="chip">${esc(name)}<button data-akey="${k}" title="Unfollow">×</button></span>`).join('')
+    : '<div class="empty" style="padding:1.5rem">No authors followed yet.</div>';
+  box.querySelectorAll('[data-akey]').forEach(btn=>btn.onclick=()=>unfollowAuthor(btn.dataset.akey));
+}
+async function unfollowAuthor(key){
+  try{
+    await fetch(DB+'/followedAuthors/'+key+'.json',{method:'DELETE'});
+    delete followedAuthors[key];
+    renderAuthors();
+  }catch(e){ toast("Couldn't remove"); }
+}
+async function followAuthor(name){
+  name=name.trim(); if(!name) return;
+  if(Object.values(followedAuthors).some(n=>n.toLowerCase()===name.toLowerCase())){toast('Already following');return;}
+  try{
+    const res=await fetch(DB+'/followedAuthors.json',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(name)});
+    const {name:key}=await res.json();
+    followedAuthors[key]=name;
+    renderAuthors();
+    toast('Following '+name);
+  }catch(e){ toast("Couldn't add"); }
 }
 
 async function healSeries(){

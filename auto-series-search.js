@@ -15,16 +15,22 @@ if (!HC_TOKEN || !DB) { console.error('Missing env vars'); process.exit(1); }
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
-async function hardcover(query, variables) {
-  const res = await fetch(HC_ENDPOINT, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'Authorization': 'Bearer ' + HC_TOKEN,
-      'User-Agent': 'book-shelf-auto-series-search (personal reading tracker)'
-    },
-    body: JSON.stringify({ query, variables })
-  });
+async function hardcover(query, variables, retried) {
+  let res;
+  try {
+    res = await fetch(HC_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + HC_TOKEN,
+        'User-Agent': 'book-shelf-auto-series-search (personal reading tracker)'
+      },
+      body: JSON.stringify({ query, variables })
+    });
+  } catch (e) {
+    if (!retried) { await sleep(2000); return hardcover(query, variables, true); }
+    throw e;
+  }
   if (res.status === 429) {
     const wait = parseInt(res.headers.get('Retry-After') || '10', 10);
     console.log(`Rate limited, waiting ${wait}s...`);
@@ -78,6 +84,7 @@ function coverFromHit(doc) {
   let seriesFilled = 0, coversFilled = 0, noHit = 0;
 
   for (const [id, b] of entries) {
+   try {
     const q = `${b.title} ${(b.author || '').split(',')[0]}`.trim();
     const data = await hardcover(SEARCH_QUERY, { q });
     await sleep(1300); // search bucket is stricter; pace gently
@@ -120,6 +127,10 @@ function coverFromHit(doc) {
       if (patch.cover) coversFilled++;
       console.log(`  ${b.title}${patch.series ? ' → ' + patch.series + (patch.seriesNum != null ? ' #' + patch.seriesNum : '') : ''}${patch.cover ? ' [cover]' : ''}`);
     }
+   } catch (e) {
+    console.log(`  (skipped ${b.title}: ${e.code || e.message})`);
+    await sleep(2000); // brief pause after a network hiccup
+   }
   }
 
   console.log(`Done. Series: +${seriesFilled}, covers: +${coversFilled}, no match: ${noHit}, of ${entries.length}.`);

@@ -78,7 +78,7 @@ function coverFromHit(doc) {
   if (!booksRaw) { console.log('No books.'); return; }
 
   const entries = Object.entries(booksRaw).filter(([id, b]) =>
-    !(b.series && b.series.trim()) || !(b.cover && b.cover.trim())
+    !(b.series && b.series.trim()) || !(b.cover && b.cover.trim()) || (b.cover && b.cover.includes('od-cdn.com'))
   );
   console.log(`${entries.length} books still need series and/or cover (search pass)...`);
   let seriesFilled = 0, coversFilled = 0, noHit = 0;
@@ -115,7 +115,7 @@ function coverFromHit(doc) {
     }
 
     // cover
-    if (!(b.cover && b.cover.trim())) {
+    if (!(b.cover && b.cover.trim()) || (b.cover && b.cover.includes('od-cdn.com'))) {
       const cov = coverFromHit(doc);
       if (cov) { patch.cover = cov; if (b.coverCleared) patch.coverCleared = null; }
     }

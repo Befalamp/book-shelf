@@ -112,6 +112,24 @@
   .meta .t{font-family:'Fraunces',serif;font-size:.98rem;line-height:1.15;font-weight:500}
   .meta .a{font-size:.78rem;color:var(--paper-dim);margin-top:.15rem}
   .meta .stars{color:var(--gilt);font-size:.8rem;margin-top:.25rem;letter-spacing:.05em}
+  .meta .status{margin-top:.3rem;font-size:.72rem}
+  .status .tick{color:var(--sage);font-weight:600}
+  .undobtn{
+    background:transparent;border:none;color:var(--paper-dim);cursor:pointer;
+    font-size:.9rem;padding:0 .2rem;transition:.15s;
+  }
+  .undobtn:hover{color:var(--gilt)}
+  .markbtn{
+    margin-top:.3rem;width:100%;background:transparent;border:1px solid var(--gilt);
+    color:var(--gilt-soft);font-family:'Inter',sans-serif;font-size:.72rem;font-weight:600;
+    padding:.32rem;border-radius:6px;cursor:pointer;transition:.15s;
+  }
+  .markbtn:hover{background:var(--gilt);color:var(--ink)}
+  .cover .rdg{
+    position:absolute;bottom:.5rem;left:.5rem;font-size:.6rem;font-weight:600;letter-spacing:.05em;
+    padding:.2rem .45rem;border-radius:20px;background:rgba(22,27,33,.86);color:var(--gilt-soft);
+    backdrop-filter:blur(2px);
+  }
 
   /* release radar */
   .rel{
@@ -220,7 +238,6 @@
         <option value="series">Group by series</option>
         <option value="finished">Recently finished</option>
         <option value="title">Title A–Z</option>
-        <option value="rating">Highest rated</option>
         <option value="author">Group by author</option>
       </select>
       <button class="addbtn" id="add">+ Add book</button>
@@ -267,12 +284,15 @@
     </div>
     <div class="row2">
       <div class="field">
-        <label>Date finished</label>
+        <label>Date</label>
         <input id="f-finished" type="date">
       </div>
       <div class="field">
-        <label>Rating</label>
-        <div class="rate" id="rate"></div>
+        <label>Status</label>
+        <select id="f-status">
+          <option value="finished">Finished</option>
+          <option value="reading">Currently reading</option>
+        </select>
       </div>
     </div>
     <div class="actions">
@@ -315,20 +335,25 @@ async function load(){
   }
   renderBooks();
   renderReleases();
+  healCovers();   // fill any missing covers from the browser
 }
 
 /* ============ RENDER LIBRARY ============ */
 function card(b){
-  return `<div class="book">
+  const reading = b.status==='reading';
+  return `<div class="book" data-id="${b.id}">
       <div class="cover">
         ${b.cover?`<img src="${esc(b.cover)}" alt="">`:`<div class="placeholder">&</div>`}
         <button class="del" data-id="${b.id}" title="Remove">×</button>
         <span class="fmt ${b.format}">${b.format==='audio'?'AUDIO':'PRINT'}</span>
+        ${reading?`<span class="rdg">READING</span>`:''}
       </div>
       <div class="meta">
         <div class="t">${esc(b.title)}</div>
         <div class="a">${esc(b.author)}</div>
-        <div class="stars">${stars(b.rating||0)}</div>
+        ${reading
+          ? `<button class="markbtn" data-toggle="${b.id}">Mark finished</button>`
+          : `<div class="status"><span class="tick">✓ Finished</span> <button class="undobtn" data-toggle="${b.id}" title="Back to reading">↺</button></div>`}
       </div>
     </div>`;
 }
@@ -356,13 +381,13 @@ function renderBooks(){
   } else {
     const sorted=[...books].sort((a,b)=>{
       if(key==="finished")return (b.finished||"").localeCompare(a.finished||"");
-      if(key==="rating")return (b.rating||0)-(a.rating||0);
       return (a[key]||"").localeCompare(b[key]||"");
     });
     grid.innerHTML = sorted.map(card).join('');
   }
-  // wire delete buttons
+  // wire buttons
   grid.querySelectorAll('.del').forEach(btn=>btn.onclick=()=>removeBook(btn.dataset.id));
+  grid.querySelectorAll('[data-toggle]').forEach(btn=>btn.onclick=()=>toggleStatus(btn.dataset.toggle));
 }
 
 function renderReleases(){
@@ -399,20 +424,13 @@ const fTitle=document.getElementById('f-title'), fAuthor=document.getElementById
       fFinished=document.getElementById('f-finished');
 const preview=document.getElementById('preview'), pCover=document.getElementById('p-cover'),
       pTitle=document.getElementById('p-title'), pAuthor=document.getElementById('p-author');
-let chosenCover='', chosenRating=0;
-
-// star rating widget
-const rate=document.getElementById('rate');
-rate.innerHTML=[1,2,3,4,5].map(i=>`<span data-i="${i}">★</span>`).join('');
-rate.querySelectorAll('span').forEach(s=>{
-  s.onclick=()=>{chosenRating=+s.dataset.i;paintStars();};
-});
-function paintStars(){rate.querySelectorAll('span').forEach(s=>s.classList.toggle('lit',+s.dataset.i<=chosenRating));}
+const fStatus=document.getElementById('f-status');
+let chosenCover='';
 
 function openModal(){
-  fTitle.value='';fAuthor.value='';fSeries.value='';fFormat.value='audio';
+  fTitle.value='';fAuthor.value='';fSeries.value='';fFormat.value='audio';fStatus.value='finished';
   fFinished.value=new Date().toISOString().slice(0,10);
-  chosenCover='';chosenRating=0;paintStars();
+  chosenCover='';
   preview.classList.remove('show');
   overlay.classList.add('on');
   setTimeout(()=>fTitle.focus(),50);
@@ -454,7 +472,7 @@ document.getElementById('save').onclick=async()=>{
   const btn=document.getElementById('save');
   btn.disabled=true;btn.textContent='Saving…';
   const rec={title,author,series:fSeries.value.trim(),format:fFormat.value,
-             rating:chosenRating,finished:fFinished.value,cover:chosenCover};
+             status:fStatus.value,finished:fFinished.value,cover:chosenCover};
   try{
     const res=await fetch(BOOKS_URL,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(rec)});
     if(!res.ok)throw new Error('HTTP '+res.status);
@@ -480,6 +498,43 @@ async function removeBook(id){
     renderBooks();
     toast('Removed');
   }catch(e){console.error(e);toast("Couldn't remove — try again");}
+}
+
+// toggle a book between reading and finished (PATCH just the changed fields)
+async function toggleStatus(id){
+  const b=books.find(x=>x.id===id); if(!b)return;
+  const now = b.status==='finished' ? 'reading' : 'finished';
+  const patch = {status:now};
+  if(now==='finished') patch.finished=new Date().toISOString().slice(0,10);
+  try{
+    const res=await fetch(DB+'/books/'+id+'.json',{method:'PATCH',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify(patch)});
+    if(!res.ok)throw new Error('HTTP '+res.status);
+    b.status=now; if(patch.finished)b.finished=patch.finished;
+    renderBooks();
+    toast(now==='finished'?'Marked finished':'Back to reading');
+  }catch(e){console.error(e);toast("Couldn't update — try again");}
+}
+
+// fill in any missing covers via Google Books (runs in browser, saves back to Firebase)
+async function healCovers(){
+  const missing=books.filter(b=>!b.cover);
+  for(const b of missing){
+    try{
+      const q=encodeURIComponent(b.title+' '+(b.author||'').split(',')[0]);
+      const res=await fetch('https://www.googleapis.com/books/v1/volumes?maxResults=1&q='+q);
+      const data=await res.json();
+      const v=data.items&&data.items[0]&&data.items[0].volumeInfo;
+      const img=v&&v.imageLinks&&(v.imageLinks.thumbnail||v.imageLinks.smallThumbnail);
+      if(!img)continue;
+      const cover=img.replace('http://','https://').replace('&edge=curl','');
+      await fetch(DB+'/books/'+b.id+'.json',{method:'PATCH',
+        headers:{'Content-Type':'application/json'},body:JSON.stringify({cover})});
+      b.cover=cover;
+      renderBooks();               // repaint as each one lands
+      await new Promise(r=>setTimeout(r,140));
+    }catch(e){/* skip on error */}
+  }
 }
 
 /* ============ GO ============ */

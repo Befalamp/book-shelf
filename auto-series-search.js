@@ -73,6 +73,19 @@ function coverFromHit(doc) {
   return img.url || '';
 }
 
+// Google Books fallback for covers
+async function googleCover(title, author) {
+  try {
+    const q = encodeURIComponent(`${title} ${(author||'').split(',')[0]}`);
+    const res = await fetch(`https://www.googleapis.com/books/v1/volumes?maxResults=1&q=${q}`);
+    if (!res.ok) return '';
+    const data = await res.json();
+    const v = data.items && data.items[0] && data.items[0].volumeInfo;
+    const img = v && v.imageLinks && (v.imageLinks.thumbnail || v.imageLinks.smallThumbnail);
+    return img ? img.replace('http://','https://').replace('&edge=curl','') : '';
+  } catch (e) { return ''; }
+}
+
 (async () => {
   const booksRaw = await fbGet('books');
   if (!booksRaw) { console.log('No books.'); return; }
@@ -116,7 +129,8 @@ function coverFromHit(doc) {
 
     // cover
     if (!(b.cover && b.cover.trim()) || (b.cover && b.cover.includes('od-cdn.com'))) {
-      const cov = coverFromHit(doc);
+      let cov = coverFromHit(doc);
+      if (!cov) { cov = await googleCover(b.title, b.author); await sleep(1100); }
       if (cov) { patch.cover = cov; if (b.coverCleared) patch.coverCleared = null; }
     }
 

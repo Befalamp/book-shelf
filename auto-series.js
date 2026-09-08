@@ -55,6 +55,8 @@ query BookSeries($title: String!) {
   books(where: { title: { _eq: $title }, book_status_id: { _eq: 1 } }, limit: 5) {
     id
     title
+    image { url }
+    cached_image
     contributions(where: { contributable_type: { _eq: "Book" } }) {
       author { name }
     }
@@ -72,42 +74,73 @@ const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim
   const booksRaw = await fbGet('books');
   if (!booksRaw) { console.log('No books in Firebase.'); return; }
 
-  // only standalone books (no series set), skip the boxsets/collections (title contains "boxset"/"collection"/"books 1")
+  // helper: pull a usable cover URL out of the Hardcover book record
+  function coverFrom(hb) {
+    if (hb.image && hb.image.url) return hb.image.url;
+    if (hb.cached_image) {
+      try {
+        const c = typeof hb.cached_image === 'string' ? JSON.parse(hb.cached_image) : hb.cached_image;
+        if (c && c.url) return c.url;
+      } catch (e) {}
+    }
+    return '';
+  }
+
+  // process any book missing a series OR missing a cover
   const entries = Object.entries(booksRaw).filter(([id, b]) => {
-    if (b.series && b.series.trim()) return false;
-    const t = (b.title || '').toLowerCase();
-    if (/boxset|collection|books \d|vol\.|part (one|two|three)/.test(t)) return false;
+    const needsSeries = !(b.series && b.series.trim());
+    const needsCover = !(b.cover && b.cover.trim());
+    if (!needsSeries && !needsCover) return false;
     return true;
   });
 
-  console.log(`${entries.length} standalone books to check for series...`);
-  let filled = 0;
+  console.log(`${entries.length} books need a series and/or cover...`);
+  let seriesFilled = 0, coversFilled = 0;
 
   for (const [id, b] of entries) {
     const data = await hardcover(SERIES_QUERY, { title: b.title });
     await sleep(1100);
     if (!data || !data.books || !data.books.length) continue;
 
-    // prefer a match whose author matches ours and which HAS a series
     const myAuthor = norm((b.author || '').split(',')[0]);
-    let match = null;
+    // pick the best matching book record (author matches; prefer one with a series)
+    let match = null, fallback = null;
     for (const hb of data.books) {
       const authors = (hb.contributions || []).map(c => norm(c.author && c.author.name));
       const authorOk = !myAuthor || authors.some(a => a && (a.includes(myAuthor) || myAuthor.includes(a)));
-      if (authorOk && hb.book_series && hb.book_series.length) { match = hb; break; }
+      if (!authorOk) continue;
+      if (!fallback) fallback = hb;
+      if (hb.book_series && hb.book_series.length) { match = hb; break; }
     }
-    if (!match) continue;
+    const chosen = match || fallback;
+    if (!chosen) continue;
 
-    // take the first series listed
-    const bs = match.book_series[0];
-    const seriesName = bs.series && bs.series.name;
-    if (!seriesName) continue;
-    const patch = { series: seriesName };
-    if (bs.position != null) patch.seriesNum = bs.position;
+    const patch = {};
 
+    // series (only if we don't already have one, and this is a boxset-safe title)
+    const isBoxset = /boxset|collection|books \d|vol\.|part (one|two|three)/i.test(b.title || '');
+    if (!(b.series && b.series.trim()) && !isBoxset && chosen.book_series && chosen.book_series.length) {
+      const bs = chosen.book_series[0];
+      if (bs.series && bs.series.name) {
+        patch.series = bs.series.name;
+        if (bs.position != null) patch.seriesNum = bs.position;
+      }
+    }
+
+    // cover (only if we don't already have one)
+    if (!(b.cover && b.cover.trim())) {
+      const cov = coverFrom(chosen);
+      if (cov) patch.cover = cov;
+    }
+
+    if (!Object.keys(patch).length) continue;
     const ok = await fbPatch('books/' + id, patch);
-    if (ok) { filled++; console.log(`  ${b.title} -> ${seriesName}${patch.seriesNum ? ' #' + patch.seriesNum : ''}`); }
+    if (ok) {
+      if (patch.series) { seriesFilled++; }
+      if (patch.cover) { coversFilled++; }
+      console.log(`  ${b.title}${patch.series ? ' → ' + patch.series + (patch.seriesNum!=null?' #'+patch.seriesNum:'') : ''}${patch.cover ? ' [cover]' : ''}`);
+    }
   }
 
-  console.log(`Done. Filled series on ${filled} of ${entries.length} books.`);
+  console.log(`Done. Series filled: ${seriesFilled}, covers filled: ${coversFilled}, of ${entries.length} checked.`);
 })().catch(e => { console.error(e); process.exit(1); });

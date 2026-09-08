@@ -100,6 +100,10 @@ query Upcoming($name: String!, $today: date!) {
     title
     release_date
     slug
+    book_series {
+      position
+      series { name }
+    }
     contributions(where: { contributable_type: { _eq: "Book" } }, limit: 1) {
       author { name }
     }
@@ -144,12 +148,15 @@ query Upcoming($name: String!, $today: date!) {
       const author = (b.contributions && b.contributions[0] && b.contributions[0].author && b.contributions[0].author.name) || name;
       const k = keyFor(b.title, author);
       if (dismissed.has(k)) continue;  // user hid this one
+      const bs = (b.book_series && b.book_series[0]) || null;
       releases[k] = {
         title: b.title,
         author,
         date: b.release_date,
         hardcoverId: b.id,
         slug: b.slug || '',
+        series: bs && bs.series ? bs.series.name : '',
+        seriesNum: bs && bs.position != null ? bs.position : null,
         checkedAt: today
       };
     }

@@ -48,7 +48,20 @@ async function fbPut(path, data) {
   return r.ok;
 }
 
-// find the series id by name (exact), then list its books in order
+// some series names in Firebase don't match Hardcover exactly — try alternates
+const SERIES_ALIASES = {
+  "Dr Ruth Galloway Mysteries": ["Ruth Galloway", "Ruth Galloway Mysteries"],
+  "Manon Bradshaw": ["DS Manon Bradshaw"],
+  "DCI Walker": ["DCI Walker Crime Thrillers"],
+  "DCI Yorke": ["DCI Michael Yorke Thriller", "DCI Michael Yorke"],
+  "The Jurassic Coast Mysteries": [],  // not on Hardcover as a series — manual only
+};
+
+function seriesNameVariants(name) {
+  const variants = [name];
+  if (SERIES_ALIASES[name]) variants.push(...SERIES_ALIASES[name]);
+  return variants;
+}
 const SERIES_ID_QUERY = `
 query SeriesId($name: String!) {
   series(where: { name: { _eq: $name } }, order_by: { books_count: desc }, limit: 1) {
@@ -108,14 +121,19 @@ const keyFor = (t, a) => (a + '_' + t).toLowerCase().replace(/[^a-z0-9]+/g, '-')
   const names = Object.keys(series);
   console.log(`${names.length} series you've started — checking for later books...`);
   const catchup = {};
+  const notFound = [];  // series Hardcover couldn't resolve, for OL fallback
 
   for (const name of names) {
     const s = series[name];
-    // resolve series id
-    const idData = await hardcover(SERIES_ID_QUERY, { name });
-    await sleep(1100);
-    const sid = idData && idData.series && idData.series[0] && idData.series[0].id;
-    if (!sid) { console.log(`  ? ${name}: not found on Hardcover`); continue; }
+    // try name variants to handle Hardcover naming differences
+    let sid = null;
+    for (const variant of seriesNameVariants(name)) {
+      const idData = await hardcover(SERIES_ID_QUERY, { name: variant });
+      await sleep(1100);
+      sid = idData && idData.series && idData.series[0] && idData.series[0].id;
+      if (sid) break;
+    }
+    if (!sid) { console.log(`  ? ${name}: not found on Hardcover`); notFound.push({ name, s }); continue; }
 
     const data = await hardcover(SERIES_BOOKS_QUERY, { id: sid });
     await sleep(1100);
@@ -154,5 +172,69 @@ const keyFor = (t, a) => (a + '_' + t).toLowerCase().replace(/[^a-z0-9]+/g, '-')
 
   const ok = await fbPut('catchup', catchup);
   console.log(ok ? `Wrote ${Object.keys(catchup).length} catch-up books.` : 'Failed to write.');
+
+  // ---------- OPEN LIBRARY FALLBACK for series Hardcover couldn't find ----------
+  if (notFound.length) {
+    console.log(`\nOpen Library fallback for ${notFound.length} series Hardcover missed...`);
+    let olAdded = 0;
+    for (const { name, s } of notFound) {
+      const author = s.author;
+      if (!author) continue;
+      try {
+        // find author on Open Library
+        const authRes = await fetch(`https://openlibrary.org/search/authors.json?q=${encodeURIComponent(author)}`);
+        const authData = await authRes.json();
+        await sleep(1100);
+        const authDoc = authData.docs && authData.docs.find(d =>
+          norm(d.name || '').includes(norm(author)) || norm(author).includes(norm(d.name || ''))
+        );
+        if (!authDoc) { console.log(`  ? ${name} (${author}): author not found on OL`); continue; }
+
+        // get their works
+        const worksRes = await fetch(`https://openlibrary.org/authors/${authDoc.key}/works.json?limit=200`);
+        const worksData = await worksRes.json();
+        await sleep(1100);
+        const works = worksData.entries || [];
+
+        // subtract titles we already own (normalised match)
+        const newWorks = works.filter(w => {
+          const t = norm(w.title || '');
+          return t && !s.titles.has(t) && !t.includes('boxset') && !t.includes('collection');
+        });
+
+        let added = 0;
+        for (const w of newWorks) {
+          if (added >= 5) break;
+          const title = w.title || '';
+          const k = keyFor(title, author);
+          if (catchup[k]) continue; // already in catchup from Hardcover
+          // try to get a cover from OL covers API
+          const coverId = w.covers && w.covers[0];
+          const cover = coverId ? `https://covers.openlibrary.org/b/id/${coverId}-M.jpg` : '';
+          catchup[k] = {
+            title,
+            author,
+            series: name,
+            seriesNum: null,  // OL doesn't reliably have position
+            slug: '',
+            cover,
+            releaseDate: '',
+            source: 'openlibrary'
+          };
+          added++;
+        }
+        if (added) { olAdded += added; console.log(`  ${name} (${author}): +${added} from Open Library`); }
+        else { console.log(`  ${name} (${author}): no new books found on OL`); }
+      } catch (e) {
+        console.log(`  (skipped ${name}: ${e.message})`);
+        await sleep(1500);
+      }
+    }
+    if (olAdded) {
+      const ok2 = await fbPut('catchup', catchup);
+      console.log(ok2 ? `Updated with ${olAdded} books from Open Library.` : 'Failed to update.');
+    }
+  }
+
   if (!ok) process.exit(1);
 })().catch(e => { console.error(e); process.exit(1); });

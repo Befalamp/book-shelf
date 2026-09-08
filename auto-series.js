@@ -130,7 +130,7 @@ const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim
     // cover (only if we don't already have one)
     if (!(b.cover && b.cover.trim())) {
       const cov = coverFrom(chosen);
-      if (cov) patch.cover = cov;
+      if (cov) { patch.cover = cov; if (b.coverCleared) patch.coverCleared = null; }
     }
 
     if (!Object.keys(patch).length) continue;

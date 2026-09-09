@@ -73,7 +73,42 @@ function coverFromHit(doc) {
   return img.url || '';
 }
 
-// Google Books fallback for covers
+// ISBN-13 (978 prefix) to ISBN-10
+function isbn13to10(isbn13) {
+  const clean = isbn13.replace(/[^0-9]/g, '');
+  if (clean.length !== 13 || !clean.startsWith('978')) return null;
+  const core = clean.slice(3, 12);
+  let sum = 0;
+  for (let i = 0; i < 9; i++) sum += parseInt(core[i]) * (10 - i);
+  const check = (11 - (sum % 11)) % 11;
+  return core + (check === 10 ? 'X' : String(check));
+}
+
+// query Hardcover for a book's editions to get ISBNs → Amazon cover URL
+const EDITIONS_QUERY = `
+query Editions($id: Int!) {
+  editions(where: { book_id: { _eq: $id } }, limit: 5, order_by: { users_count: desc_nulls_last }) {
+    isbn_10
+    isbn_13
+  }
+}`;
+
+async function amazonCoverById(bookId) {
+  if (!bookId) return '';
+  const data = await hardcover(EDITIONS_QUERY, { id: bookId });
+  await sleep(1100);
+  if (!data || !data.editions) return '';
+  for (const ed of data.editions) {
+    if (ed.isbn_10) return `https://m.media-amazon.com/images/P/${ed.isbn_10}.jpg`;
+    if (ed.isbn_13) {
+      const isbn10 = isbn13to10(ed.isbn_13);
+      if (isbn10) return `https://m.media-amazon.com/images/P/${isbn10}.jpg`;
+    }
+  }
+  return '';
+}
+
+// Google Books fallback
 async function googleCover(title, author) {
   try {
     const q = encodeURIComponent(`${title} ${(author||'').split(',')[0]}`);
@@ -90,9 +125,12 @@ async function googleCover(title, author) {
   const booksRaw = await fbGet('books');
   if (!booksRaw) { console.log('No books.'); return; }
 
-  const entries = Object.entries(booksRaw).filter(([id, b]) =>
-    !(b.series && b.series.trim()) || !(b.cover && b.cover.trim()) || (b.cover && b.cover.includes('od-cdn.com'))
-  );
+  const entries = Object.entries(booksRaw).filter(([id, b]) => {
+    const needsSeries = !(b.series && b.series.trim());
+    const hasAmazonCover = b.cover && b.cover.includes('m.media-amazon.com');
+    if (!needsSeries && hasAmazonCover) return false;
+    return true;
+  });
   console.log(`${entries.length} books still need series and/or cover (search pass)...`);
   let seriesFilled = 0, coversFilled = 0, noHit = 0;
 
@@ -127,9 +165,11 @@ async function googleCover(title, author) {
       }
     }
 
-    // cover
-    if (!(b.cover && b.cover.trim()) || (b.cover && b.cover.includes('od-cdn.com'))) {
-      let cov = coverFromHit(doc);
+    // cover: Amazon via ISBN first, then Hardcover hit image, then Google Books
+    const hasAmazonCover = b.cover && b.cover.includes('m.media-amazon.com');
+    if (!hasAmazonCover) {
+      let cov = await amazonCoverById(doc.id);
+      if (!cov) cov = coverFromHit(doc);
       if (!cov) { cov = await googleCover(b.title, b.author); await sleep(1100); }
       if (cov) { patch.cover = cov; if (b.coverCleared) patch.coverCleared = null; }
     }

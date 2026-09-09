@@ -1,1051 +1,177 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<link rel="manifest" href="manifest.json">
-<meta name="theme-color" content="#161b21">
-<link rel="apple-touch-icon" href="icon-192.png">
-<title>Shelf</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,500;0,9..144,600;1,9..144,400&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
-<style>
-  :root{
-    --ink:#161b21;
-    --ink-soft:#1e252d;
-    --card:#212a33;
-    --edge:#33414d;
-    --paper:#ece3d2;
-    --paper-dim:#a9a394;
-    --gilt:#c9a24b;
-    --gilt-soft:#e0c584;
-    --sage:#7c9a72;
-    --plum:#9a6f97;
-    --rose:#c07a6e;
-  }
-  *{box-sizing:border-box;margin:0;padding:0}
-  body{
-    font-family:'Inter',sans-serif;
-    background:
-      radial-gradient(circle at 15% 0%, #223 0%, transparent 45%),
-      radial-gradient(circle at 90% 100%, #1c2733 0%, transparent 50%),
-      var(--ink);
-    color:var(--paper);
-    min-height:100vh;
-    padding:0 0 4rem;
-  }
-  header{
-    padding:2.4rem 1.6rem 1.4rem;
-    text-align:center;
-    position:relative;
-  }
-  header::after{
-    content:"";display:block;width:64px;height:1px;margin:1.2rem auto 0;
-    background:linear-gradient(90deg,transparent,var(--gilt),transparent);
-  }
-  .mark{font-size:.72rem;letter-spacing:.28em;color:var(--gilt);font-weight:600}
-  h1{
-    font-family:'Fraunces',serif;font-weight:500;font-size:2.9rem;
-    line-height:1;margin:.3rem 0 .2rem;font-optical-sizing:auto;
-  }
-  h1 em{font-style:italic;color:var(--gilt-soft)}
-  .sub{color:var(--paper-dim);font-size:.9rem}
+/**
+ * Auto-Series (search pass) — typo-tolerant fill for books the exact-title
+ * pass missed. Uses Hardcover's search endpoint (Typesense) which tolerates
+ * punctuation/spelling differences, then reads series + cover from the top hit.
+ *
+ * Env: HARDCOVER_TOKEN, FIREBASE_DB_URL
+ * Node 18+.
+ */
 
-  nav{
-    display:flex;gap:.4rem;justify-content:center;margin:1.6rem auto 0;
-    max-width:420px;padding:0 1.2rem;
-  }
-  .tab{
-    flex:1;background:transparent;border:1px solid var(--edge);color:var(--paper-dim);
-    font-family:'Inter',sans-serif;font-size:.9rem;font-weight:500;
-    padding:.7rem;border-radius:10px;cursor:pointer;transition:.18s;
-  }
-  .tab:hover{color:var(--paper);border-color:var(--gilt)}
-  .tab.on{background:var(--gilt);color:var(--ink);border-color:var(--gilt);font-weight:600}
+const HC_TOKEN = process.env.HARDCOVER_TOKEN;
+const DB = (process.env.FIREBASE_DB_URL || '').replace(/\/$/, '');
+const HC_ENDPOINT = 'https://api.hardcover.app/v1/graphql';
+if (!HC_TOKEN || !DB) { console.error('Missing env vars'); process.exit(1); }
 
-  main{max-width:960px;margin:0 auto;padding:1.8rem 1.2rem 0}
-  .view{display:none}
-  .view.on{display:block}
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
-  .bar{
-    display:flex;flex-wrap:wrap;gap:.6rem;align-items:center;
-    margin-bottom:1.6rem;
+async function hardcover(query, variables, retried) {
+  let res;
+  try {
+    res = await fetch(HC_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + HC_TOKEN,
+        'User-Agent': 'book-shelf-auto-series-search (personal reading tracker)'
+      },
+      body: JSON.stringify({ query, variables })
+    });
+  } catch (e) {
+    if (!retried) { await sleep(2000); return hardcover(query, variables, true); }
+    throw e;
   }
-  .bar .count{font-family:'Fraunces',serif;font-size:1.05rem;color:var(--paper-dim);margin-right:auto}
-  .bar .count b{color:var(--paper);font-weight:600}
-  select,.addbtn{
-    background:var(--ink-soft);border:1px solid var(--edge);color:var(--paper);
-    font-family:'Inter',sans-serif;font-size:.85rem;padding:.55rem .8rem;
-    border-radius:9px;cursor:pointer;
+  if (res.status === 429) {
+    const wait = parseInt(res.headers.get('Retry-After') || '10', 10);
+    console.log(`Rate limited, waiting ${wait}s...`);
+    await sleep(wait * 1000);
+    return hardcover(query, variables);
   }
-  .addbtn{background:var(--sage);border-color:var(--sage);color:var(--ink);font-weight:600}
-  .addbtn:hover{filter:brightness(1.08)}
-
-  .grid{
-    display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));
-    gap:1.8rem 1.1rem;align-items:start;
-  }
-  .book{cursor:default}
-  .cover{
-    position:relative;aspect-ratio:2/3;border-radius:6px;overflow:hidden;
-    background:linear-gradient(150deg,var(--card),var(--ink-soft));
-    border:1px solid var(--edge);
-    box-shadow:0 10px 22px -12px #000, inset 0 0 0 1px rgba(255,255,255,.02);
-    display:flex;align-items:flex-end;
-  }
-  .cover img{width:100%;height:100%;object-fit:cover;display:block}
-  .cover .placeholder{
-    position:absolute;inset:0;display:flex;align-items:center;justify-content:center;
-    font-family:'Fraunces',serif;font-style:italic;font-size:2.4rem;
-    color:var(--edge);
-  }
-  .cover .placeholder::after{
-    content:"";position:absolute;left:50%;bottom:22%;transform:translateX(-50%);
-    width:26px;height:1px;background:var(--edge);
-  }
-  .cover .fmt{
-    position:absolute;top:.5rem;right:.5rem;font-size:.62rem;font-weight:600;
-    letter-spacing:.06em;padding:.2rem .45rem;border-radius:20px;
-    background:rgba(22,27,33,.82);backdrop-filter:blur(2px);
-  }
-  .fmt.audio{color:var(--plum)}
-  .fmt.print{color:var(--sage)}
-  .meta{padding:.6rem .1rem 0}
-  .meta .t{
-    font-family:'Fraunces',serif;font-size:.98rem;line-height:1.28;font-weight:500;
-    min-height:2.56em;                /* 2 lines at 1.28 */
-    display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;
-  }
-  .meta .a{
-    font-size:.78rem;color:var(--paper-dim);margin-top:.25rem;line-height:1.35;
-    min-height:1.35em;                /* 1 line, keeps buttons level when authors wrap differently */
-    display:-webkit-box;-webkit-line-clamp:1;-webkit-box-orient:vertical;overflow:hidden;
-  }
-  .meta .stars{color:var(--gilt);font-size:.8rem;margin-top:.25rem;letter-spacing:.05em}
-  .meta .snum{
-    display:inline-block;font-size:.7rem;font-weight:600;color:var(--gilt);
-    background:rgba(201,162,75,.12);border-radius:4px;padding:.05rem .3rem;margin-right:.35rem;
-    vertical-align:middle;
-  }
-  .meta .snum.set{color:var(--plum);background:rgba(154,111,151,.16)}
-  .statusbtn{
-    margin-top:.35rem;width:100%;font-family:'Inter',sans-serif;font-size:.72rem;font-weight:600;
-    padding:.32rem;border-radius:6px;cursor:pointer;transition:.15s;border:1px solid;
-    white-space:nowrap;
-  }
-  .statusbtn.reading{background:transparent;border-color:var(--gilt);color:var(--gilt-soft)}
-  .statusbtn.reading:hover{background:var(--gilt);color:var(--ink)}
-  .statusbtn.done{background:rgba(124,154,114,.14);border-color:var(--sage);color:var(--sage)}
-  .statusbtn.done:hover{background:var(--sage);color:var(--ink)}
-  .cover .fin{
-    position:absolute;top:.5rem;left:.5rem;width:22px;height:22px;border-radius:50%;
-    background:var(--sage);color:var(--ink);font-size:.8rem;font-weight:700;
-    display:flex;align-items:center;justify-content:center;
-    box-shadow:0 2px 6px -1px rgba(0,0,0,.5);
-  }
-  .cover .rdg{
-    position:absolute;bottom:.5rem;left:.5rem;font-size:.6rem;font-weight:600;letter-spacing:.05em;
-    padding:.2rem .45rem;border-radius:20px;background:rgba(22,27,33,.86);color:var(--gilt-soft);
-    backdrop-filter:blur(2px);
-  }
-
-  /* release radar */
-  .rel{
-    display:flex;gap:1rem;align-items:center;position:relative;
-    background:var(--ink-soft);border:1px solid var(--edge);border-left:3px solid var(--gilt);
-    border-radius:10px;padding:.9rem 1.1rem;margin-bottom:.7rem;
-  }
-  .reldismiss{
-    background:transparent;border:none;color:var(--paper-dim);cursor:pointer;font-size:1.2rem;
-    line-height:1;padding:0 .2rem;margin-left:.3rem;transition:.15s;
-  }
-  .reldismiss:hover{color:var(--rose)}
-  .rel .date{
-    font-family:'Fraunces',serif;text-align:center;min-width:58px;line-height:1;
-  }
-  .rel .date .d{font-size:1.5rem;font-weight:600;color:var(--gilt-soft)}
-  .rel .date .m{font-size:.7rem;letter-spacing:.12em;color:var(--paper-dim);margin-top:.2rem}
-  .rel .info .t{font-family:'Fraunces',serif;font-size:1.05rem;font-weight:500}
-  .rel .info .a{font-size:.82rem;color:var(--paper-dim)}
-  .rel .away{margin-left:auto;font-size:.78rem;color:var(--paper-dim);text-align:right;white-space:nowrap}
-  .rel.soon{border-left-color:var(--rose)}
-  .rel.soon .away{color:var(--rose)}
-
-  .group-h{
-    grid-column:1/-1;display:flex;align-items:baseline;gap:.8rem;
-    font-family:'Fraunces',serif;font-size:1.35rem;font-weight:500;
-    color:var(--gilt-soft);margin:.6rem 0 -.4rem;cursor:pointer;user-select:none;
-  }
-  .group-h .caret{font-size:.9rem;transition:transform .18s;display:inline-block}
-  .group-h.collapsed .caret{transform:rotate(-90deg)}
-  .group-h:hover{color:var(--gilt)}
-  .group-h:not(:first-child){margin-top:1.4rem}
-  .group-h .c{font-family:'Inter',sans-serif;font-size:.75rem;color:var(--paper-dim);font-weight:500}
-  .cubadge{
-    display:inline-block;background:rgba(192,122,110,.15);color:var(--rose);
-    font-size:.68rem;font-weight:600;padding:.15rem .45rem;border-radius:10px;
-    margin-left:.4rem;vertical-align:middle;
-  }
-  .group-h::after{content:"";flex:1;height:1px;background:linear-gradient(90deg,var(--edge),transparent)}
-  .empty{text-align:center;color:var(--paper-dim);padding:3rem 1rem;font-family:'Fraunces',serif;font-style:italic}
-
-  /* modal */
-  .overlay{
-    position:fixed;inset:0;background:rgba(8,11,14,.72);backdrop-filter:blur(3px);
-    display:none;align-items:flex-start;justify-content:center;padding:2rem 1rem;
-    z-index:50;overflow-y:auto;
-  }
-  .overlay.on{display:flex}
-  .modal{
-    background:var(--ink-soft);border:1px solid var(--edge);border-radius:14px;
-    width:100%;max-width:440px;padding:1.6rem;
-    box-shadow:0 24px 60px -20px #000;
-  }
-  .modal h2{font-family:'Fraunces',serif;font-weight:500;font-size:1.5rem;margin-bottom:.3rem}
-  .modal h2 em{font-style:italic;color:var(--gilt-soft)}
-  .modal .hint{color:var(--paper-dim);font-size:.82rem;margin-bottom:1.2rem}
-  .field{margin-bottom:.9rem}
-  .field label{display:block;font-size:.75rem;color:var(--paper-dim);margin-bottom:.35rem;letter-spacing:.03em}
-  .field input, .field select{
-    width:100%;background:var(--ink);border:1px solid var(--edge);color:var(--paper);
-    font-family:'Inter',sans-serif;font-size:.92rem;padding:.6rem .7rem;border-radius:8px;
-  }
-  .field input:focus,.field select:focus{outline:none;border-color:var(--gilt)}
-  .row2{display:grid;grid-template-columns:1fr 1fr;gap:.9rem}
-  .preview{
-    display:flex;gap:.9rem;align-items:center;margin:.4rem 0 1rem;min-height:0;
-    max-height:0;overflow:hidden;opacity:0;transition:.3s;
-  }
-  .preview.show{max-height:120px;opacity:1;margin:.4rem 0 1rem}
-  .preview img{width:56px;height:84px;object-fit:cover;border-radius:4px;border:1px solid var(--edge)}
-  .preview .px{font-size:.8rem;color:var(--paper-dim)}
-  .preview .px b{color:var(--paper);font-family:'Fraunces',serif;font-weight:500;display:block;font-size:.95rem}
-  .rate{display:flex;gap:.25rem}
-  .rate span{font-size:1.5rem;color:var(--edge);cursor:pointer;transition:.12s}
-  .rate span.lit{color:var(--gilt)}
-  .actions{display:flex;gap:.6rem;margin-top:1.2rem}
-  .actions button{
-    flex:1;font-family:'Inter',sans-serif;font-size:.9rem;font-weight:600;
-    padding:.7rem;border-radius:9px;cursor:pointer;border:1px solid var(--edge);
-  }
-  .btn-cancel{background:transparent;color:var(--paper-dim)}
-  .btn-cancel:hover{color:var(--paper)}
-  .btn-save{background:var(--gilt);border-color:var(--gilt);color:var(--ink)}
-  .btn-save:hover{filter:brightness(1.08)}
-  .btn-save:disabled{opacity:.4;cursor:not-allowed}
-  .book .del{
-    position:absolute;bottom:.5rem;left:.5rem;width:24px;height:24px;border-radius:50%;
-    background:rgba(22,27,33,.82);color:var(--rose);border:none;cursor:pointer;
-    font-size:1rem;line-height:1;display:none;align-items:center;justify-content:center;
-    backdrop-filter:blur(2px);z-index:2;
-  }
-  .book .fixcover{
-    position:absolute;bottom:.5rem;left:2.3rem;width:24px;height:24px;border-radius:50%;
-    background:rgba(22,27,33,.82);color:var(--gilt-soft);border:none;cursor:pointer;
-    font-size:.95rem;line-height:1;display:none;align-items:center;justify-content:center;
-    backdrop-filter:blur(2px);z-index:2;
-  }
-  .cover:hover .fixcover{display:flex}
-  .book .editbtn{
-    position:absolute;bottom:.5rem;right:.5rem;width:24px;height:24px;border-radius:50%;
-    background:rgba(22,27,33,.82);color:var(--paper-dim);border:none;cursor:pointer;
-    font-size:.85rem;line-height:1;display:none;align-items:center;justify-content:center;
-    backdrop-filter:blur(2px);z-index:2;
-  }
-  .cover:hover .editbtn{display:flex}
-  .editbtn:hover{color:var(--gilt)}
-  .cover:hover .del{display:flex}
-  .toast{
-    position:fixed;bottom:2rem;left:50%;transform:translateX(-50%) translateY(160%);
-    background:var(--sage);color:var(--ink);font-weight:600;font-size:.86rem;
-    padding:.7rem 1.2rem;border-radius:24px;transition:.3s;z-index:60;
-    max-width:90vw;text-align:center;box-shadow:0 8px 24px -6px rgba(0,0,0,.6);
-  }
-  .toast.show{transform:translateX(-50%) translateY(0)}
-  .loading{text-align:center;color:var(--paper-dim);padding:3rem;font-family:'Fraunces',serif;font-style:italic}
-  .chip{
-    display:inline-flex;align-items:center;gap:.4rem;background:var(--card);border:1px solid var(--edge);
-    border-radius:20px;padding:.35rem .5rem .35rem .8rem;margin:0 .4rem .5rem 0;font-size:.82rem;
-  }
-  .chip button{
-    background:var(--edge);color:var(--paper);border:none;border-radius:50%;width:18px;height:18px;
-    cursor:pointer;font-size:.85rem;line-height:1;display:flex;align-items:center;justify-content:center;
-  }
-  .chip button:hover{background:var(--rose);color:var(--ink)}
-</style>
-</head>
-<body>
-<header>
-  <div class="mark">A PERSONAL LIBRARY</div>
-  <h1>The <em>Shelf</em></h1>
-  <div class="sub">what you've read, and what's still to come</div>
-</header>
-
-<nav>
-  <button class="tab on" data-v="library">Library</button>
-  <button class="tab" data-v="catchup">Catch Up</button>
-  <button class="tab" data-v="radar">Release Radar</button>
-</nav>
-
-<main>
-  <section class="view on" id="library">
-    <div class="bar">
-      <div class="count"><b id="n">0</b> books shelved</div>
-      <select id="sort">
-        <option value="series">Group by series</option>
-        <option value="finished">Recently finished</option>
-        <option value="title">Title A–Z</option>
-        <option value="author">Group by author</option>
-      </select>
-      <button class="addbtn" id="collapseall" style="background:var(--ink-soft);border-color:var(--edge);color:var(--paper)">Collapse all</button>
-      <button class="addbtn" id="add">+ Add book</button>
-    </div>
-    <div class="grid" id="grid"></div>
-  </section>
-
-  <section class="view" id="catchup">
-    <div class="bar">
-      <div class="count"><b id="cn">0</b> to catch up on</div>
-      <button class="addbtn" id="addcatchup">+ Add manually</button>
-    </div>
-    <div id="catchupform" style="display:none;background:var(--ink-soft);border:1px solid var(--edge);border-radius:12px;padding:1.1rem;margin-bottom:1.4rem">
-      <div style="font-family:'Fraunces',serif;font-size:1.05rem;margin-bottom:.8rem">Add a book to catch up on</div>
-      <div class="row2">
-        <div class="field"><label>Title</label><input id="cu-title" type="text" autocomplete="off"></div>
-        <div class="field"><label>Author</label><input id="cu-author" type="text" autocomplete="off"></div>
-      </div>
-      <div class="row2">
-        <div class="field"><label>Series</label><input id="cu-series" type="text" autocomplete="off"></div>
-        <div class="field"><label>Number in series</label><input id="cu-num" type="number" min="1" autocomplete="off"></div>
-      </div>
-      <div class="actions">
-        <button class="btn-cancel" id="cu-cancel">Cancel</button>
-        <button class="btn-save" id="cu-save">Add to Catch Up</button>
-      </div>
-    </div>
-    <div class="grid" id="catchupgrid"></div>
-  </section>
-
-  <section class="view" id="radar">
-    <div class="bar">
-      <div class="count"><b id="rn">0</b> upcoming</div>
-      <button class="addbtn" id="managebtn" style="background:var(--ink-soft);border-color:var(--edge);color:var(--paper)">Authors (<span id="authorcount">0</span>)</button>
-    </div>
-    <div id="authorpanel" style="display:none;background:var(--ink-soft);border:1px solid var(--edge);border-radius:12px;padding:1.1rem;margin-bottom:1.4rem">
-      <div style="font-family:'Fraunces',serif;font-size:1.05rem;margin-bottom:.3rem">Authors you follow</div>
-      <div class="hint" style="color:var(--paper-dim);font-size:.82rem;margin-bottom:.9rem">New releases from these authors appear in your radar. Seeded from your shelf — add or remove any.</div>
-      <div style="display:flex;gap:.5rem;margin-bottom:1rem">
-        <input id="authorinput" type="text" placeholder="Add an author…" autocomplete="off"
-          style="flex:1;background:var(--ink);border:1px solid var(--edge);color:var(--paper);font-family:'Inter',sans-serif;font-size:.88rem;padding:.55rem .7rem;border-radius:8px">
-        <button id="authoradd" class="addbtn">Add</button>
-      </div>
-      <div id="authorlist"></div>
-    </div>
-    <div id="rellist"></div>
-  </section>
-</main>
-
-<div class="overlay" id="overlay">
-  <div class="modal">
-    <h2>Add a <em>book</em></h2>
-    <div class="hint">Type the title — we'll find the cover and author for you.</div>
-    <div class="field">
-      <label>Title</label>
-      <input id="f-title" type="text" placeholder="Start typing…" autocomplete="off">
-    </div>
-    <div class="preview" id="preview">
-      <img id="p-cover" src="" alt="">
-      <div class="px"><b id="p-title"></b><span id="p-author"></span></div>
-    </div>
-    <div class="field">
-      <label>Author</label>
-      <input id="f-author" type="text" autocomplete="off">
-    </div>
-    <div class="row2">
-      <div class="field">
-        <label>Series (optional)</label>
-        <input id="f-series" type="text" placeholder="e.g. The Locked Tomb" autocomplete="off">
-      </div>
-      <div class="field">
-        <label>Format</label>
-        <select id="f-format">
-          <option value="audio">Audiobook</option>
-          <option value="print">Print / eBook</option>
-        </select>
-      </div>
-    </div>
-    <div class="row2">
-      <div class="field">
-        <label>Date</label>
-        <input id="f-finished" type="date">
-      </div>
-      <div class="field">
-        <label>Status</label>
-        <select id="f-status">
-          <option value="finished">Finished</option>
-          <option value="reading">Currently reading</option>
-        </select>
-      </div>
-    </div>
-    <div class="actions">
-      <button class="btn-cancel" id="cancel">Cancel</button>
-      <button class="btn-save" id="save">Add to shelf</button>
-    </div>
-  </div>
-</div>
-
-<div class="toast" id="toast"></div>
-
-<div class="overlay" id="editoverlay">
-  <div class="modal">
-    <h2>Edit <em>book</em></h2>
-    <div class="field"><label>Title</label><input id="e-title" type="text" autocomplete="off"></div>
-    <div class="field"><label>Author</label><input id="e-author" type="text" autocomplete="off"></div>
-    <div class="row2">
-      <div class="field"><label>Series</label><input id="e-series" type="text" placeholder="Leave blank for standalone" autocomplete="off"></div>
-      <div class="field"><label>Number in series</label><input id="e-num" type="number" min="0" autocomplete="off"></div>
-    </div>
-    <div class="field"><label>ISBN (10 or 13 — auto-fetches Amazon cover)</label><input id="e-isbn" type="text" placeholder="e.g. 0241988268" autocomplete="off"></div>
-    <div class="actions">
-      <button class="btn-cancel" id="e-cancel">Cancel</button>
-      <button class="btn-save" id="e-save">Save</button>
-    </div>
-  </div>
-</div>
-
-<script>
-/* ============ CONFIG ============ */
-const DB = 'https://book-shelf-6fdb0-default-rtdb.europe-west1.firebasedatabase.app';
-const BOOKS_URL    = DB + '/books.json';
-const RELEASES_URL = DB + '/releases.json';
-
-/* title -> [series, number]. Confident series only; rest stay standalone until Hardcover fills them. */
-const SERIES_MAP = {"Holy Island":["DCI Ryan Mysteries",1],"Sycamore Gap":["DCI Ryan Mysteries",2],"Heavenfield":["DCI Ryan Mysteries",3],"Angel":["DCI Ryan Mysteries",4],"High Force":["DCI Ryan Mysteries",5],"Cragside":["DCI Ryan Mysteries",6],"Dark Skies":["DCI Ryan Mysteries",7],"Seven Bridges":["DCI Ryan Mysteries",8],"The Hermitage":["DCI Ryan Mysteries",9],"Longstone":["DCI Ryan Mysteries",10],"The Infirmary":["DCI Ryan Mysteries",11],"The Moor":["DCI Ryan Mysteries",12],"Penshaw":["DCI Ryan Mysteries",13],"Borderlands: A DCI Ryan Mystery":["DCI Ryan Mysteries",14],"Ryan's Christmas: A DCI Ryan Mystery":["DCI Ryan Mysteries",15],"The Shrine":["DCI Ryan Mysteries",16],"Cuthbert's Way":["DCI Ryan Mysteries",17],"The Rock":["DCI Ryan Mysteries",18],"Bamburgh":["DCI Ryan Mysteries",19],"Lady's Well":["DCI Ryan Mysteries",20],"Impostor: An Alexander Gregory Thriller":["Alexander Gregory Thrillers",1],"Natural Causes":["Inspector McLean",1],"The Book of Souls":["Inspector McLean",2],"The Hangman's Song":["Inspector McLean",3],"Dead Men's Bones":["Inspector McLean",4],"Prayer for the Dead":["Inspector McLean",5],"The Damage Done":["Inspector McLean",6],"Written in Bones":["Inspector McLean",7],"The Gathering Dark":["Inspector McLean",8],"Cold as the Grave":["Inspector McLean",9],"Bury Them Deep":["Inspector McLean",10],"What Will Burn":["Inspector McLean",11],"All That Lives":["Inspector McLean",12],"For Our Sins":["Constance Fairchild",4],"The Rest Is Death":["Constance Fairchild",5],"The Crossing Places":["Dr Ruth Galloway Mysteries",1],"The Janus Stone":["Dr Ruth Galloway Mysteries",2],"The House at Sea's End":["Dr Ruth Galloway Mysteries",3],"A Room Full of Bones":["Dr Ruth Galloway Mysteries",4],"Dying Fall":["Dr Ruth Galloway Mysteries",5],"The Locked Room":["Dr Ruth Galloway Mysteries",14],"The Last Remains":["Dr Ruth Galloway Mysteries",15],"The Affair":["Jack Reacher",16],"A Wanted Man":["Jack Reacher",17],"Never Go Back":["Jack Reacher",18],"Personal":["Jack Reacher",19],"Make Me":["Jack Reacher",20],"The Midnight Line":["Jack Reacher",22],"Past Tense":["Jack Reacher",23],"Blue Moon":["Jack Reacher",24],"Crossbones Yard":["Alice Quentin",1],"A Killing of Angels":["Alice Quentin",2],"Hell Bay":["DI Ben Kitto",1],"Ruin Beach":["DI Ben Kitto",2],"Burnt Island":["DI Ben Kitto",3],"Pulpit Rock":["DI Ben Kitto",4],"Silent Scream":["DI Kim Stone",1],"Evil Games":["DI Kim Stone",2],"Lost Girls":["DI Kim Stone",3],"Eeny Meeny":["DI Helen Grace",1],"Pop Goes the Weasel":["DI Helen Grace",2],"The Doll's House":["DI Helen Grace",3],"Harry Potter and the Philosopher's Stone, Book 1":["Harry Potter",1],"Harry Potter and the Chamber of Secrets, Book 2":["Harry Potter",2],"Harry Potter and the Prisoner of Azkaban, Book 3":["Harry Potter",3],"As the Crow Flies":["DI Nick Dixon Crime",1],"Head in the Sand":["DI Nick Dixon Crime",2],"Kickback":["DI Nick Dixon Crime",3],"Swansong":["DI Nick Dixon Crime",4],"Dead Level":["DI Nick Dixon Crime",5],"Death Sentence":["DI Nick Dixon Crime",6],"Heads or Tails":["DI Nick Dixon Crime",7],"Dead Lock":["DI Nick Dixon Crime",8],"Beyond the Point":["DI Nick Dixon Crime",9],"Down Among the Dead":["DI Nick Dixon Crime",10],"Death Message":["DI Nick Dixon Crime",11],"From the Ashes":["DI Nick Dixon Crime",12],"Blue Blood":["DI Nick Dixon Crime",13],"Deceived by the Light":["DI Nick Dixon Crime",14],"The Body in the Marsh":["DCI Craig Gillard",1],"The Body on the Shore":["DCI Craig Gillard",2],"The Body In The Mist":["DCI Craig Gillard",3],"The Corfe Castle Murders":["Dorset Crime",1],"The Clifftop Murders":["Dorset Crime",2],"The Island Murders":["Dorset Crime",3],"The Monument Murders":["Dorset Crime",4],"The Millionaire Murders":["Dorset Crime",5],"The Fossil Beach Murders":["Dorset Crime",6],"The Blue Pool Murders":["Dorset Crime",7],"The Lighthouse Murders":["Dorset Crime",8],"The Ghost Village Murders":["Dorset Crime",9],"The Lochside Murder":["Dorset Crime",10],"The Chesil Beach Murders":["Dorset Crime",11],"The Beach Hut Murders":["Dorset Crime",12],"The Poole Harbour Murders":["Dorset Crime",13],"The Gold Hill Murders":["Dorset Crime",14],"Deadly Wishes":["Detective Zoe Finch",1],"Deadly Fallout":["Detective Zoe Finch",3],"Deadly Reprisal":["Detective Zoe Finch",4],"Deadly Terror":["Detective Zoe Finch",7],"Dead Wrong":["Calladine & Bayliss",1],"Dead Silent":["Calladine & Bayliss",2],"Dead List":["Calladine & Bayliss",3],"Dead Lost":["Calladine & Bayliss",4],"Dead & Buried":["Calladine & Bayliss",5],"Dead Nasty":["Calladine & Bayliss",6],"Dead Jealous":["Calladine & Bayliss",7],"Dead Wicked":["Calladine & Bayliss",8],"Dead Bad":["Calladine & Bayliss",9],"Dead Guilty":["Calladine & Bayliss",10],"Next Victim":["Calladine & Bayliss",11],"Cumbria Crime Boxset 1-4":["Cumbria Crime",0,4],"Detective Zoe Finch: Books 1-3":["Detective Zoe Finch",0,3],"The Jurassic Coast Mysteries Boxset 1-3":["The Jurassic Coast Mysteries",0,3],"Detective Sebastian Clifford, Books 1-3":["Detective Sebastian Clifford",0,3],"The DCI Walker Collection, Books 1-3":["DCI Walker",0,3],"DCI Yorke Boxset":["DCI Yorke",0,3]};
-const SERIES_OVERRIDES = {"Question of Guilt":["Detective Sebastian Clifford",7],"Wake the Past":["Detective Sebastian Clifford",6],"Fear the Truth":["Detective Sebastian Clifford",5],"Hidden from Sight":["Detective Sebastian Clifford",4]};
-const LIBBY_IMPORT = [{"title":"Murder at Church Lodge","author":"Greg Mosse","series":"","format":"audio","status":"finished","finished":"2025-03-03","cover":"https://img1.od-cdn.com/ImageType-100/1855-1/%7B1FEE35BF-328B-47C5-92C1-2CDF0957A2BF%7DIMG100.JPG","source":"libby"},{"title":"The One You Trust","author":"Paul Pilkington","series":"","format":"audio","status":"finished","finished":"2024-07-18","cover":"https://img2.od-cdn.com/ImageType-100/6645-1/%7B6278B9B1-BAEA-48F2-B06D-EE7AA45BE1F9%7DIMG100.JPG","source":"libby"},{"title":"The One You Fear","author":"Paul Pilkington","series":"","format":"audio","status":"finished","finished":"2024-07-16","cover":"https://img3.od-cdn.com/ImageType-100/6645-1/%7BBE17A255-B081-42CE-B434-A9C939B8258B%7DIMG100.JPG","source":"libby"},{"title":"River Deep","author":"Priscilla Masters","series":"","format":"audio","status":"finished","finished":"2024-07-10","cover":"https://img1.od-cdn.com/ImageType-100/7723-1/%7B4ACCCADF-B749-40C5-BB30-FF80A57EDB08%7DIMG100.JPG","source":"libby"},{"title":"The One You Love","author":"Paul Pilkington","series":"","format":"audio","status":"finished","finished":"2024-07-10","cover":"https://img1.od-cdn.com/ImageType-100/6645-1/%7BF9AA6197-E436-413C-96DC-209FC192DE3C%7DIMG100.JPG","source":"libby"},{"title":"False Value","author":"Ben Aaronovitch","series":"Rivers of London","format":"audio","status":"finished","finished":"2023-11-14","cover":"https://img1.od-cdn.com/ImageType-100/1855-1/%7B1E59F86A-66DE-4009-9F01-ED69A843FB40%7DImg100.jpg","source":"libby","seriesNum":8},{"title":"Killing Floor","author":"Lee Child","series":"Jack Reacher","format":"audio","status":"finished","finished":"2022-02-05","cover":"https://img3.od-cdn.com/ImageType-100/0211-1/%7B106BE5C6-C882-4B65-9718-296487109F56%7DImg100.jpg","source":"libby","seriesNum":1},{"title":"The Dead Tracks","author":"Tim Weaver","series":"David Raker","format":"audio","status":"finished","finished":"2021-12-16","cover":"https://img1.od-cdn.com/ImageType-100/0211-1/%7B92E6C90F-25EE-42C1-8D1A-76AE2130C94F%7DIMG100.JPG","source":"libby","seriesNum":2},{"title":"Chasing the Dead","author":"Tim Weaver","series":"David Raker","format":"audio","status":"finished","finished":"2021-12-14","cover":"https://img3.od-cdn.com/ImageType-100/0211-1/%7B84BD6131-ECED-40D5-8538-747A6745806C%7DIMG100.JPG","source":"libby","seriesNum":1},{"title":"The Night Hawks","author":"Elly Griffiths","series":"Dr Ruth Galloway Mysteries","format":"audio","status":"finished","finished":"2021-12-01","cover":"https://img2.od-cdn.com/ImageType-100/1855-1/%7BE7AF7FD0-CAC3-40C7-BF01-44879589604C%7DImg100.jpg","source":"libby","seriesNum":13},{"title":"The Lantern Men","author":"Elly Griffiths","series":"Dr Ruth Galloway Mysteries","format":"audio","status":"finished","finished":"2021-11-24","cover":"https://img1.od-cdn.com/ImageType-100/1855-1/%7BB90440EF-A386-48B1-8030-6ADCF495D887%7DImg100.jpg","source":"libby","seriesNum":12},{"title":"The Stone Circle","author":"Elly Griffiths","series":"Dr Ruth Galloway Mysteries","format":"audio","status":"finished","finished":"2021-11-24","cover":"https://img3.od-cdn.com/ImageType-100/1855-1/%7B7A5D5D47-08D4-4F81-A7DD-69EDF600558F%7DImg100.jpg","source":"libby","seriesNum":11},{"title":"The Dark Angel","author":"Elly Griffiths","series":"Dr Ruth Galloway Mysteries","format":"audio","status":"finished","finished":"2021-11-15","cover":"https://img3.od-cdn.com/ImageType-100/1855-1/%7BB7123AAC-6CB7-4340-9862-E8A22F685A2E%7DImg100.jpg","source":"libby","seriesNum":10},{"title":"The Chalk Pit","author":"Elly Griffiths","series":"Dr Ruth Galloway Mysteries","format":"audio","status":"finished","finished":"2021-11-15","cover":"https://img1.od-cdn.com/ImageType-100/1855-1/%7BF7343686-1C17-494C-BBC4-0BE8C1875755%7DImg100.jpg","source":"libby","seriesNum":9},{"title":"The Woman in Blue","author":"Elly Griffiths","series":"Dr Ruth Galloway Mysteries","format":"audio","status":"finished","finished":"2021-11-10","cover":"https://img1.od-cdn.com/ImageType-100/1855-1/%7BCB4913C4-6529-4C3E-8093-BDCCDEFAEDD9%7DImg100.jpg","source":"libby","seriesNum":8},{"title":"The Ghost Fields","author":"Elly Griffiths","series":"Dr Ruth Galloway Mysteries","format":"audio","status":"finished","finished":"2021-11-05","cover":"https://img3.od-cdn.com/ImageType-100/1855-1/%7B6C5D3E33-AAC1-4D02-A1A4-32BD3E5F2EB3%7DImg100.jpg","source":"libby","seriesNum":7},{"title":"The Outcast Dead","author":"Elly Griffiths","series":"Dr Ruth Galloway Mysteries","format":"audio","status":"finished","finished":"2021-11-02","cover":"https://img2.od-cdn.com/ImageType-100/7723-1/%7BA178A062-37D0-45B0-A595-4F153109D6EB%7DIMG100.JPG","source":"libby","seriesNum":6},{"title":"The Never Game","author":"Jeffery Deaver","series":"","format":"audio","status":"finished","finished":"2021-09-13","cover":"https://img1.od-cdn.com/ImageType-100/1855-1/%7B24C2023C-4532-443D-B047-C01E513ED670%7DImg100.jpg","source":"libby"},{"title":"The Burying Ground","author":"David Mark","series":"","format":"audio","status":"finished","finished":"2021-05-04","cover":"https://img1.od-cdn.com/ImageType-100/1855-1/%7BFE7D72FA-38F7-4DC1-B80F-22C8FA2ED64E%7DImg100.jpg","source":"libby"},{"title":"Cold Mourning","author":"Brenda Chapman","series":"","format":"audio","status":"finished","finished":"2021-05-04","cover":"https://img1.od-cdn.com/ImageType-100/5177-1/%7B6B9E84E4-6FE4-401B-93B1-F0F04DBF35FA%7DIMG100.JPG","source":"libby"},{"title":"Lies Sleeping","author":"Ben Aaronovitch","series":"Rivers of London","format":"audio","status":"finished","finished":"2021-03-15","cover":"https://img2.od-cdn.com/ImageType-100/1855-1/%7BB0997FFD-C396-47AA-A100-104C29398E76%7DImg100.jpg","source":"libby","seriesNum":7},{"title":"The Hanging Tree","author":"Ben Aaronovitch","series":"Rivers of London","format":"audio","status":"finished","finished":"2021-03-09","cover":"https://img1.od-cdn.com/ImageType-100/1855-1/%7BD49E134C-7769-4B1E-9A5D-1F0FF8505BA8%7DImg100.jpg","source":"libby","seriesNum":6},{"title":"Foxglove Summer","author":"Ben Aaronovitch","series":"Rivers of London","format":"audio","status":"finished","finished":"2021-03-05","cover":"https://img3.od-cdn.com/ImageType-100/1855-1/%7B9999D8EA-D85A-47BA-9185-04C9E6994E01%7DImg100.jpg","source":"libby","seriesNum":5},{"title":"Broken Homes","author":"Ben Aaronovitch","series":"Rivers of London","format":"audio","status":"finished","finished":"2021-02-25","cover":"https://img2.od-cdn.com/ImageType-100/1855-1/%7BE02CAAD6-247D-481D-94FF-C8C149E85712%7DImg100.jpg","source":"libby","seriesNum":4},{"title":"Whispers Underground","author":"Ben Aaronovitch","series":"Rivers of London","format":"audio","status":"finished","finished":"2021-02-18","cover":"https://img3.od-cdn.com/ImageType-100/1855-1/%7B0ACC6FC5-2506-420A-85D9-EBAC0D8DC176%7DImg100.jpg","source":"libby","seriesNum":3},{"title":"Moon Over Soho","author":"Ben Aaronovitch","series":"Rivers of London","format":"audio","status":"finished","finished":"2021-02-16","cover":"https://img3.od-cdn.com/ImageType-100/1855-1/%7BA900160D-FE93-4A73-9D30-2A0CA07EE4DA%7DImg100.jpg","source":"libby","seriesNum":2},{"title":"Platform Seven","author":"Louise Doughty","series":"","format":"audio","status":"finished","finished":"2021-02-14","cover":"https://img3.od-cdn.com/ImageType-100/1855-1/%7BE44A5CAE-7944-4981-80A1-9DCDBE6D552A%7DImg100.jpg","source":"libby"},{"title":"Rivers of London","author":"Ben Aaronovitch","series":"Rivers of London","format":"audio","status":"finished","finished":"2021-02-11","cover":"https://img2.od-cdn.com/ImageType-100/1855-1/%7BF5D698EC-13CD-4FB6-8E92-9A5A6B85A16E%7DImg100.jpg","source":"libby","seriesNum":1},{"title":"My Lies, Your Lies","author":"Susan Lewis","series":"","format":"audio","status":"finished","finished":"2021-02-06","cover":"https://img2.od-cdn.com/ImageType-100/7723-1/%7BA302DD87-61EC-495F-82B7-083D832BBEDA%7DImg100.jpg","source":"libby"},{"title":"The Lying Room","author":"Nicci French","series":"","format":"audio","status":"finished","finished":"2021-02-04","cover":"https://img3.od-cdn.com/ImageType-100/1855-1/%7B34357650-8390-431A-80F1-F8BDEB3FFAA7%7DImg100.png","source":"libby"},{"title":"The Third Wife","author":"Lisa Jewell","series":"","format":"audio","status":"finished","finished":"2021-01-31","cover":"https://img1.od-cdn.com/ImageType-100/0211-1/%7B1824C8C0-018D-4438-8B18-D3EF178A779F%7DIMG100.JPG","source":"libby"},{"title":"A Room Full of Killers","author":"Michael Wood","series":"DCI Matilda Darke","format":"audio","status":"finished","finished":"2021-01-07","cover":"https://img2.od-cdn.com/ImageType-100/1855-1/%7B23C55F40-F374-4F59-950B-4145401E397D%7DImg100.jpg","source":"libby","seriesNum":3},{"title":"Outside Looking In","author":"Michael Wood","series":"DCI Matilda Darke","format":"audio","status":"finished","finished":"2020-12-18","cover":"https://img1.od-cdn.com/ImageType-100/1855-1/%7BA6C1125D-9B54-44C3-8E3C-03C83B6CD530%7DImg100.jpg","source":"libby","seriesNum":2},{"title":"For Reasons Unknown","author":"Michael Wood","series":"DCI Matilda Darke","format":"audio","status":"finished","finished":"2020-12-15","cover":"https://img2.od-cdn.com/ImageType-100/1855-1/%7B6FC06D29-382A-4A42-AF36-1C19B01D43D1%7DImg100.jpg","source":"libby","seriesNum":1},{"title":"All the Rage","author":"Cara Hunter","series":"DI Fawley","format":"audio","status":"finished","finished":"2020-12-10","cover":"https://img2.od-cdn.com/ImageType-100/0290-1/%7B5ED8FD41-5E9B-4538-8B86-3531F9D370AB%7DImg100.jpg","source":"libby","seriesNum":4},{"title":"No Way Out","author":"Cara Hunter","series":"DI Fawley","format":"audio","status":"finished","finished":"2020-12-08","cover":"https://img1.od-cdn.com/ImageType-100/0211-1/%7BCA64F385-9044-4F18-9FC8-C77D1A9C9D6F%7DIMG100.JPG","source":"libby","seriesNum":3},{"title":"In the Dark","author":"Cara Hunter","series":"DI Fawley","format":"audio","status":"finished","finished":"2020-12-03","cover":"https://img1.od-cdn.com/ImageType-100/0290-1/%7B6A661444-2957-47B1-9190-7989B50F872A%7DImg100.jpg","source":"libby","seriesNum":2},{"title":"Close to Home","author":"Cara Hunter","series":"DI Fawley","format":"audio","status":"finished","finished":"2020-12-01","cover":"https://img1.od-cdn.com/ImageType-100/0290-1/%7B1C65ED07-5BE2-45DA-8A78-2DA8427DB404%7DImg100.jpg","source":"libby","seriesNum":1},{"title":"Mercy","author":"Jussi Adler-Olsen","series":"","format":"audio","status":"finished","finished":"2020-12-01","cover":"https://img1.od-cdn.com/ImageType-100/0290-1/%7B220F9257-2BAE-40DB-8429-F9C6E87CF87C%7DImg100.jpg","source":"libby"},{"title":"The Hit","author":"Anna Smith","series":"Rosie Gilmour","format":"audio","status":"finished","finished":"2020-10-20","cover":"https://img1.od-cdn.com/ImageType-100/1855-1/%7B7636CD87-770A-4C41-A15F-748E6F51400C%7DImg100.jpg","source":"libby","seriesNum":8},{"title":"Perfect Remains","author":"Helen Fields","series":"","format":"audio","status":"finished","finished":"2020-10-20","cover":"https://img3.od-cdn.com/ImageType-100/1855-1/%7B98D401CE-1990-403A-A199-DAC11F9DEA41%7DImg100.jpg","source":"libby"},{"title":"The Wives","author":"Tarryn Fisher","series":"","format":"audio","status":"finished","finished":"2020-10-13","cover":"https://img2.od-cdn.com/ImageType-100/1855-1/%7B75A922DB-66B6-4BC1-8391-B850CA64B83B%7DImg100.jpg","source":"libby"},{"title":"Dead to Her","author":"Sarah Pinborough","series":"","format":"audio","status":"finished","finished":"2020-10-12","cover":"https://img2.od-cdn.com/ImageType-100/1855-1/%7B6545C21F-7015-49CA-BD94-3D8228252A04%7DImg100.jpg","source":"libby"},{"title":"Truth or Die","author":"Katerina Diamond","series":"","format":"audio","status":"finished","finished":"2020-09-15","cover":"https://img2.od-cdn.com/ImageType-100/1855-1/%7BF429E00F-D430-4C20-ADD2-EF6696566DA0%7DImg100.jpg","source":"libby"},{"title":"The Promise","author":"Katerina Diamond","series":"","format":"audio","status":"finished","finished":"2020-09-03","cover":"https://img2.od-cdn.com/ImageType-100/1855-1/%7B5787A4C6-CB30-4098-9153-7B1C24A96B82%7DImg100.jpg","source":"libby"},{"title":"The Angel","author":"Katerina Diamond","series":"Imogen Grey","format":"audio","status":"finished","finished":"2020-08-21","cover":"https://img1.od-cdn.com/ImageType-100/1855-1/%7B411543BE-419E-4581-A450-7B316F5F02C9%7DImg100.jpg","source":"libby","seriesNum":3},{"title":"The Secret","author":"Katerina Diamond","series":"Imogen Grey","format":"audio","status":"finished","finished":"2020-08-18","cover":"https://img2.od-cdn.com/ImageType-100/1855-1/%7BAC5B3F28-697A-494C-B779-6D6D25188F86%7DImg100.jpg","source":"libby","seriesNum":2},{"title":"The Teacher","author":"Katerina Diamond","series":"Imogen Grey","format":"audio","status":"finished","finished":"2020-08-12","cover":"https://img2.od-cdn.com/ImageType-100/0292-1/%7B8288583F-2EF5-4C28-8FAF-2D9C7974503F%7DImg100.jpg","source":"libby","seriesNum":1},{"title":"Woman in the Water","author":"Katerina Diamond","series":"","format":"audio","status":"finished","finished":"2020-08-06","cover":"https://img3.od-cdn.com/ImageType-100/1855-1/%7B4E329822-85B5-4413-9551-2A5F2DE964DF%7DImg100.jpg","source":"libby"},{"title":"Scrappy Little Nobody","author":"Anna Kendrick","series":"","format":"audio","status":"finished","finished":"2020-08-04","cover":"https://img2.od-cdn.com/ImageType-100/5054-1/%7B8A9BE1A2-20C4-403A-B23D-1FBDBDB97E0D%7DImg100.jpg","source":"libby"},{"title":"Kill Me Twice","author":"Anna Smith","series":"Rosie Gilmour","format":"audio","status":"finished","finished":"2020-07-31","cover":"https://img3.od-cdn.com/ImageType-100/1855-1/%7B1C97DC1D-115A-46CA-AA8F-8F0D7876EECD%7DImg100.jpg","source":"libby","seriesNum":7},{"title":"Rough Cut","author":"Anna Smith","series":"Rosie Gilmour","format":"audio","status":"finished","finished":"2020-07-27","cover":"https://img3.od-cdn.com/ImageType-100/1855-1/%7B6D2DC112-CBE5-489E-A844-58326150B040%7DImg100.jpg","source":"libby","seriesNum":6},{"title":"Betrayed","author":"Anna Smith","series":"Rosie Gilmour","format":"audio","status":"finished","finished":"2020-07-20","cover":"https://img3.od-cdn.com/ImageType-100/1855-1/%7B26BB48E2-CEA1-4104-A00E-998835387A12%7DImg100.jpg","source":"libby","seriesNum":4},{"title":"A Cold Killing","author":"Anna Smith","series":"Rosie Gilmour","format":"audio","status":"finished","finished":"2020-07-17","cover":"https://img1.od-cdn.com/ImageType-100/1855-1/%7B2840F003-0F02-4C59-B527-4A3856B26B49%7DImg100.jpg","source":"libby","seriesNum":5},{"title":"To Tell the Truth","author":"Anna Smith","series":"Rosie Gilmour","format":"audio","status":"finished","finished":"2020-07-08","cover":"https://img3.od-cdn.com/ImageType-100/1855-1/%7B61FB75D7-FC51-4101-BCAD-6635538C95BB%7DImg100.jpg","source":"libby","seriesNum":2},{"title":"Screams in the Dark","author":"Anna Smith","series":"Rosie Gilmour","format":"audio","status":"finished","finished":"2020-07-07","cover":"https://img1.od-cdn.com/ImageType-100/1855-1/%7B2280CB61-3083-4947-8996-1233303C40F8%7DImg100.jpg","source":"libby","seriesNum":3},{"title":"The Dead Won't Sleep","author":"Anna Smith","series":"Rosie Gilmour","format":"audio","status":"finished","finished":"2020-07-03","cover":"https://img2.od-cdn.com/ImageType-100/1855-1/%7B8B562934-F189-44F7-A2C0-7E133F8CFBDD%7DImg100.jpg","source":"libby","seriesNum":1},{"title":"The Dead Ex","author":"Jane Corry","series":"","format":"audio","status":"finished","finished":"2020-06-29","cover":"https://img2.od-cdn.com/ImageType-100/0290-1/%7BE2813484-85A4-48BC-A9DC-1F4E501F2DF9%7DImg100.jpg","source":"libby"},{"title":"We Can See You","author":"Simon Kernick","series":"","format":"audio","status":"finished","finished":"2020-06-17","cover":"https://img2.od-cdn.com/ImageType-100/0211-1/%7BD5BEBBF9-C41A-48E3-85FC-CBF70426BAD3%7DImg100.jpg","source":"libby"},{"title":"The Evidence Against You","author":"Gillian McAllister","series":"","format":"audio","status":"finished","finished":"2020-06-09","cover":"https://img1.od-cdn.com/ImageType-100/0211-1/%7B24732264-1CC3-498E-BA89-788CD26588AD%7DIMG100.JPG","source":"libby"},{"title":"Clean Break","author":"Val McDermid","series":"","format":"audio","status":"finished","finished":"2020-05-29","cover":"https://img1.od-cdn.com/ImageType-100/1855-1/%7BCFDCD102-8D34-456F-8CA8-9965C3E3C59F%7DImg100.jpg","source":"libby"},{"title":"Crack Down","author":"Val McDermid","series":"","format":"audio","status":"finished","finished":"2020-05-23","cover":"https://img2.od-cdn.com/ImageType-100/1855-1/%7B96A41F09-F15C-4521-8E9D-51E4B57F21E6%7DImg100.jpg","source":"libby"},{"title":"The Distant Echo","author":"Val McDermid","series":"","format":"audio","status":"finished","finished":"2020-05-19","cover":"https://img1.od-cdn.com/ImageType-100/7723-1/%7BC0FD7D29-B30B-4D82-BAD5-212B27B450D9%7DIMG100.JPG","source":"libby"},{"title":"Kick Back","author":"Val McDermid","series":"","format":"audio","status":"finished","finished":"2020-05-14","cover":"https://img2.od-cdn.com/ImageType-100/1855-1/%7B78372D8C-0D75-425E-BCAD-EAC1B629322E%7DImg100.jpg","source":"libby"},{"title":"Dead Beat","author":"Val McDermid","series":"","format":"audio","status":"finished","finished":"2020-05-12","cover":"https://img2.od-cdn.com/ImageType-100/1855-1/%7B351C7A12-4F4D-4CD3-8162-F68681FEEE41%7DImg100.jpg","source":"libby"},{"title":"Dead Man's Daughter","author":"Roz Watkins","series":"","format":"audio","status":"finished","finished":"2020-05-04","cover":"https://img2.od-cdn.com/ImageType-100/1855-1/%7BD95B6AA8-4955-498B-A154-28BF4621BA72%7DImg100.jpg","source":"libby"},{"title":"The Devil's Dice","author":"Roz Watkins","series":"","format":"audio","status":"finished","finished":"2020-04-28","cover":"https://img2.od-cdn.com/ImageType-100/1855-1/%7B38A80924-0834-425C-98CE-993F2A4092E8%7DImg100.jpg","source":"libby"},{"title":"Stolen","author":"Paul Finch","series":"","format":"audio","status":"finished","finished":"2020-03-23","cover":"https://img2.od-cdn.com/ImageType-100/1855-1/%7B16DFDFC1-1961-4CD0-BB1C-75E0EAD3C3A6%7DImg100.jpg","source":"libby"},{"title":"Never Coming Back","author":"Tim Weaver","series":"David Raker","format":"audio","status":"finished","finished":"2020-03-09","cover":"https://img2.od-cdn.com/ImageType-100/0211-1/%7B7FBA96D8-F268-4E56-9696-E3F546DE2C13%7DIMG100.JPG","source":"libby","seriesNum":4},{"title":"Vanished","author":"Tim Weaver","series":"David Raker","format":"audio","status":"finished","finished":"2020-03-02","cover":"https://img3.od-cdn.com/ImageType-100/0211-1/%7B7EE82983-30B8-4D74-AA1F-428584CD7A44%7DIMG100.JPG","source":"libby","seriesNum":3},{"title":"Unquiet Souls","author":"Liz Mistry","series":"","format":"audio","status":"finished","finished":"2020-01-30","cover":"https://img3.od-cdn.com/ImageType-100/7723-1/%7BC6375E57-61CA-4D8C-89B9-331AA5F9D6EF%7DImg100.jpg","source":"libby"},{"title":"Murder House","author":"James Patterson","series":"","format":"audio","status":"finished","finished":"2020-01-20","cover":"https://img3.od-cdn.com/ImageType-100/0211-1/%7B9675A395-8EF8-40AC-A373-784DEC0A9EC8%7DImg100.jpg","source":"libby"},{"title":"The Woman Next Door","author":"Cass Green","series":"","format":"audio","status":"finished","finished":"2019-11-01","cover":"https://img2.od-cdn.com/ImageType-100/0292-1/%7B92D96452-18D3-4B2B-A54E-6F795693692A%7DImg100.jpg","source":"libby"},{"title":"Day of the Accident","author":"Nuala Ellwood","series":"","format":"audio","status":"finished","finished":"2019-10-28","cover":"https://img3.od-cdn.com/ImageType-100/0290-1/%7BF90D04E5-66F9-4854-BE97-45ECDDED8BAC%7DImg100.jpg","source":"libby"},{"title":"Watching You","author":"Lisa Jewell","series":"","format":"audio","status":"finished","finished":"2019-09-30","cover":"https://img3.od-cdn.com/ImageType-100/0211-1/%7BC2626912-4DF7-4844-8C28-CB13249A3E20%7DIMG100.JPG","source":"libby"},{"title":"Six Years","author":"Harlan Coben","series":"","format":"audio","status":"finished","finished":"2019-09-30","cover":"https://img2.od-cdn.com/ImageType-100/7723-1/%7B40589F93-1170-44B4-A8AB-5F1E0C05E26F%7DIMG100.JPG","source":"libby"},{"title":"An Unwanted Guest","author":"Shari Lapena","series":"","format":"audio","status":"finished","finished":"2019-09-24","cover":"https://img2.od-cdn.com/ImageType-100/0211-1/%7BA4AA3B08-3A23-4140-AE0F-B21458457F50%7DIMG100.JPG","source":"libby"},{"title":"A Stranger in the House","author":"Shari Lapena","series":"","format":"audio","status":"finished","finished":"2019-09-18","cover":"https://img1.od-cdn.com/ImageType-100/0211-1/%7B8C17DBE3-CCFD-41AD-8DAA-5F2F4A25C0DC%7DIMG100.JPG","source":"libby"},{"title":"The Couple Next Door","author":"Shari Lapena","series":"","format":"audio","status":"finished","finished":"2019-09-06","cover":"https://img3.od-cdn.com/ImageType-100/0211-1/%7B77A8CD66-4931-46AE-977B-AB02D4760A12%7DIMG100.JPG","source":"libby"},{"title":"Then She Was Gone","author":"Lisa Jewell","series":"","format":"audio","status":"finished","finished":"2019-09-05","cover":"https://img2.od-cdn.com/ImageType-100/0211-1/%7BDBAB5826-E690-41FC-BF2E-85EC3D0572CC%7DIMG100.JPG","source":"libby"},{"title":"Persons Unknown","author":"Susie Steiner","series":"Manon Bradshaw","format":"audio","status":"finished","finished":"2019-08-21","cover":"https://img3.od-cdn.com/ImageType-100/1855-1/%7BE3352983-CE68-4590-9E91-781D9D5CC05D%7DImg100.jpg","source":"libby","seriesNum":2},{"title":"Missing, Presumed","author":"Susie Steiner","series":"Manon Bradshaw","format":"audio","status":"finished","finished":"2019-08-15","cover":"https://img2.od-cdn.com/ImageType-100/1855-1/%7B802FBA28-4372-4D8D-9EA3-E8D8568F3B72%7DImg100.jpg","source":"libby","seriesNum":1},{"title":"In the Darkness","author":"Karin Fossum","series":"","format":"audio","status":"finished","finished":"2019-07-05","cover":"https://img1.od-cdn.com/ImageType-100/0211-1/%7B405EE343-9E06-416E-A92C-84B4A47E98DC%7DIMG100.JPG","source":"libby"},{"title":"The Taken","author":"Alice Clark-Platts","series":"","format":"audio","status":"finished","finished":"2019-07-05","cover":"https://img1.od-cdn.com/ImageType-100/0290-1/%7B9C3BB0DF-080A-47E3-BCD5-3674A02C05F5%7DImg100.jpg","source":"libby"},{"title":"Bitter Fruits","author":"Alice Clark-Platts","series":"","format":"audio","status":"finished","finished":"2019-07-01","cover":"https://img1.od-cdn.com/ImageType-100/0211-1/%7BB93A857A-AA0E-401E-B457-40551EA02D5C%7DIMG100.JPG","source":"libby"},{"title":"The October Man","author":"Ben Aaronovitch","series":"Rivers of London","format":"audio","status":"finished","finished":"2019-06-20","cover":"https://img3.od-cdn.com/ImageType-100/1855-1/%7B083E735C-7E8F-4045-99C0-E320F067A906%7DImg100.jpg","source":"libby","seriesNum":7.5},{"title":"The Lying Game","author":"Ruth Ware","series":"","format":"audio","status":"finished","finished":"2019-06-17","cover":"https://img1.od-cdn.com/ImageType-100/0211-1/%7B2BC791A0-CB93-43BD-9364-A590BD3B6826%7DImg100.jpg","source":"libby"},{"title":"Digital Fortress","author":"Dan Brown","series":"","format":"audio","status":"finished","finished":"2019-06-14","cover":"https://img1.od-cdn.com/ImageType-100/1493-1/%7BDC6368CB-C303-4142-8B31-87DCD764A92D%7DImg100.jpg","source":"libby"},{"title":"Worth Dying For","author":"Lee Child","series":"Jack Reacher","format":"audio","status":"finished","finished":"2019-01-28","cover":"https://img2.od-cdn.com/ImageType-100/0211-1/%7B8434AC64-2B5C-492A-B85F-6D61737B7C9F%7DIMG100.JPG","source":"libby","seriesNum":15},{"title":"61 Hours","author":"Lee Child","series":"Jack Reacher","format":"audio","status":"finished","finished":"2019-01-21","cover":"https://img2.od-cdn.com/ImageType-100/0211-1/%7BE3AC78E4-21E7-42F4-8C3B-67A0BA7C03D1%7DImg100.jpg","source":"libby","seriesNum":14},{"title":"Gone Tomorrow","author":"Lee Child","series":"Jack Reacher","format":"audio","status":"finished","finished":"2019-01-11","cover":"https://img1.od-cdn.com/ImageType-100/0211-1/%7B6DAEFD8E-9734-49D2-A324-69DFD1A1A08F%7DIMG100.JPG","source":"libby","seriesNum":13},{"title":"Nothing to Lose","author":"Lee Child","series":"Jack Reacher","format":"audio","status":"finished","finished":"2019-01-09","cover":"https://img3.od-cdn.com/ImageType-100/0211-1/%7BB16CC65B-044E-462D-9F78-A7D3F179A446%7DImg100.jpg","source":"libby","seriesNum":12},{"title":"Bad Luck and Trouble","author":"Lee Child","series":"Jack Reacher","format":"audio","status":"finished","finished":"2018-12-24","cover":"https://img3.od-cdn.com/ImageType-100/0211-1/%7B535A41A3-E44A-4943-92D6-0026A8076BC4%7DIMG100.JPG","source":"libby","seriesNum":11},{"title":"The Hard Way","author":"Lee Child","series":"Jack Reacher","format":"audio","status":"finished","finished":"2018-12-17","cover":"https://img3.od-cdn.com/ImageType-100/0211-1/%7BF96B5C0D-37BE-4AA6-BFC2-E28C55CE97C4%7DImg100.jpg","source":"libby","seriesNum":10},{"title":"One Shot","author":"Lee Child","series":"Jack Reacher","format":"audio","status":"finished","finished":"2018-12-07","cover":"https://img1.od-cdn.com/ImageType-100/0211-1/%7B9B4D501B-03A4-497B-9FB9-8DB0B171996A%7DImg100.jpg","source":"libby","seriesNum":9},{"title":"The Enemy","author":"Lee Child","series":"Jack Reacher","format":"audio","status":"finished","finished":"2018-11-26","cover":"https://img2.od-cdn.com/ImageType-100/0211-1/%7BCC0C0A33-1776-4C36-B6D2-14227B5DBFA5%7DImg100.jpg","source":"libby","seriesNum":8},{"title":"Persuader","author":"Lee Child","series":"Jack Reacher","format":"audio","status":"finished","finished":"2018-11-22","cover":"https://img1.od-cdn.com/ImageType-100/0211-1/%7B8EE00C3D-E02B-4253-8052-74D051D416F0%7DImg100.jpg","source":"libby","seriesNum":7},{"title":"Without Fail","author":"Lee Child","series":"Jack Reacher","format":"audio","status":"finished","finished":"2018-11-19","cover":"https://img1.od-cdn.com/ImageType-100/0211-1/%7BFBA31F24-460F-4A64-8D76-BD610EF2A72F%7DImg100.jpg","source":"libby","seriesNum":6},{"title":"Echo Burning","author":"Lee Child","series":"Jack Reacher","format":"audio","status":"finished","finished":"2018-11-16","cover":"https://img3.od-cdn.com/ImageType-100/0211-1/%7BF1E08D2C-D835-4771-AFE5-0738573743F6%7DImg100.jpg","source":"libby","seriesNum":5},{"title":"The Visitor","author":"Lee Child","series":"Jack Reacher","format":"audio","status":"finished","finished":"2018-11-14","cover":"https://img2.od-cdn.com/ImageType-100/0211-1/%7B0FE59F1A-7D03-4D3E-B358-BF87026C4127%7DImg100.jpg","source":"libby","seriesNum":4},{"title":"Tripwire","author":"Lee Child","series":"Jack Reacher","format":"audio","status":"finished","finished":"2018-11-05","cover":"https://img2.od-cdn.com/ImageType-100/0211-1/%7BBD676F1E-5D3D-4E03-BA89-65BE64E749FF%7DImg100.jpg","source":"libby","seriesNum":3},{"title":"Die Trying","author":"Lee Child","series":"Jack Reacher","format":"audio","status":"finished","finished":"2018-10-30","cover":"https://img2.od-cdn.com/ImageType-100/0211-1/%7BA7681B04-7BD5-470A-8371-3836117F4B98%7DImg100.jpg","source":"libby","seriesNum":2},{"title":"Stay Close","author":"Harlan Coben","series":"","format":"audio","status":"finished","finished":"2018-10-22","cover":"https://img2.od-cdn.com/ImageType-100/7723-1/%7BE772EB49-A063-44B2-9CBE-225925086961%7DImg100.jpg","source":"libby"},{"title":"The Girl Before","author":"J.P. Delaney","series":"","format":"audio","status":"finished","finished":"2018-10-09","cover":"https://img2.od-cdn.com/ImageType-100/1855-1/%7BD4B956AF-F49B-4B5C-88B2-1E8E3896034E%7DImg100.jpg","source":"libby"},{"title":"Logan McRae Book 4: Flesh House","author":"Stuart MacBride","series":"Logan McRae","format":"audio","status":"finished","finished":"2018-09-19","cover":"https://img1.od-cdn.com/ImageType-100/1855-1/%7BCB54EB76-A93A-43AC-AA5F-D4EF7CFFC6DD%7DImg100.jpg","source":"libby","seriesNum":4},{"title":"Logan McRae Book 3: Broken Skin","author":"Stuart MacBride","series":"Logan McRae","format":"audio","status":"finished","finished":"2018-09-12","cover":"https://img3.od-cdn.com/ImageType-100/1855-1/%7B61686908-F7AF-4136-88E2-D550F2A17A4E%7DImg100.jpg","source":"libby","seriesNum":3},{"title":"Logan McRae Book 2: Dying Light","author":"Stuart MacBride","series":"Logan McRae","format":"audio","status":"finished","finished":"2018-09-04","cover":"https://img1.od-cdn.com/ImageType-100/1855-1/%7BB3E500F4-FB32-4D15-8AB2-51E4F024031B%7DImg100.jpg","source":"libby","seriesNum":2},{"title":"Logan McRae Book 1: Cold Granite","author":"Stuart MacBride","series":"Logan McRae","format":"audio","status":"finished","finished":"2018-08-27","cover":"https://img1.od-cdn.com/ImageType-100/1855-1/%7BD768EF73-8146-4F97-B7AA-5A8E00D9ADDE%7DImg100.jpg","source":"libby","seriesNum":1},{"title":"Sunshine at the Comfort Food Café","author":"Debbie Johnson","series":"","format":"audio","status":"finished","finished":"2018-07-03","cover":"https://img2.od-cdn.com/ImageType-100/1855-1/%7B31657BE0-7593-4C20-9309-9238C1EDE984%7DImg100.jpg","source":"libby"},{"title":"Me and Mr Jones","author":"Lucy Diamond","series":"","format":"audio","status":"finished","finished":"2018-07-03","cover":"https://img1.od-cdn.com/ImageType-100/7723-1/%7B95406CB4-C689-4C08-A992-5DBB1B6D279F%7DImg100.jpg","source":"libby"},{"title":"The Break","author":"Marian Keyes","series":"","format":"audio","status":"finished","finished":"2018-06-21","cover":"https://img1.od-cdn.com/ImageType-100/1855-1/%7B1CF02102-959B-407B-841E-60023EBA7202%7DImg100.jpg","source":"libby"},{"title":"The Woman in the Window","author":"A.J. Finn","series":"","format":"audio","status":"finished","finished":"2018-06-21","cover":"https://img1.od-cdn.com/ImageType-100/1855-1/%7BD2778FFC-0006-48D4-9FBC-93E1261E77DF%7DImg100.jpg","source":"libby"},{"title":"Billy and Me","author":"Giovanna Fletcher","series":"","format":"audio","status":"finished","finished":"2018-06-12","cover":"https://img1.od-cdn.com/ImageType-100/0290-1/%7B663E5B7A-7C59-4CAB-8580-295479AD2B5C%7DImg100.jpg","source":"libby"},{"title":"This Secret We're Keeping","author":"Rebecca Done","series":"","format":"audio","status":"finished","finished":"2018-01-15","cover":"https://img1.od-cdn.com/ImageType-100/0290-1/%7B99526ED3-33DC-4BFC-94ED-B6C380D88F6E%7DImg100.jpg","source":"libby"},{"title":"Keep Me Safe","author":"Maya Banks","series":"","format":"audio","status":"finished","finished":"2018-01-15","cover":"https://img1.od-cdn.com/ImageType-100/0293-1/%7B64C0B50B-122B-45A5-81FE-2E34E4E517D1%7DImg100.jpg","source":"libby"},{"title":"One Hot Summer","author":"Kat French","series":"","format":"audio","status":"finished","finished":"2018-01-05","cover":"https://img1.od-cdn.com/ImageType-100/1855-1/%7B5D554AD3-C802-4DE7-AB2B-614F56D6A54E%7DImg100.jpg","source":"libby"},{"title":"The Mystery of Mercy Close","author":"Marian Keyes","series":"","format":"audio","status":"finished","finished":"2018-01-02","cover":"https://img2.od-cdn.com/ImageType-100/0211-1/%7B1323066E-80DF-4DD4-BD5B-759BBCC76C0A%7DIMG100.JPG","source":"libby"},{"title":"Just for the Holidays","author":"Sue Moorcroft","series":"","format":"audio","status":"finished","finished":"2018-01-02","cover":"https://img1.od-cdn.com/ImageType-100/1855-1/%7B6BDE3349-9593-42A4-BE17-984543D6DFA5%7DImg100.jpg","source":"libby"},{"title":"Sex, Lies, and Online Dating","author":"Rachel Gibson","series":"","format":"audio","status":"finished","finished":"2017-12-12","cover":"https://img3.od-cdn.com/ImageType-100/0887-1/%7B41E4E790-4988-454D-BAAB-D3DE97FB1DC3%7DImg100.jpg","source":"libby"},{"title":"PS, I Love You","author":"Cecelia Ahern","series":"","format":"audio","status":"finished","finished":"2017-12-12","cover":"https://img2.od-cdn.com/ImageType-100/1855-1/%7BCE1ED867-293A-4E0C-B541-38B355721BD6%7DImg100.jpg","source":"libby"},{"title":"We Were on a Break","author":"Lindsey Kelk","series":"","format":"audio","status":"finished","finished":"2017-12-01","cover":"https://img3.od-cdn.com/ImageType-100/1855-1/%7BE2E45077-CF89-41C0-BA13-BD72FA50FEBD%7DImg100.jpg","source":"libby"},{"title":"A Very Accidental Love Story","author":"Claudia Carroll","series":"","format":"audio","status":"finished","finished":"2017-12-01","cover":"https://img2.od-cdn.com/ImageType-100/1881-1/%7B07191C0D-FA1F-40FB-8A69-AEB7931F1EC5%7DImg100.jpg","source":"libby"},{"title":"This is Now","author":"Ciara Geraghty","series":"","format":"audio","status":"finished","finished":"2017-11-28","cover":"https://img2.od-cdn.com/ImageType-100/1881-1/%7B3696BBB4-9B16-4DED-9212-3BB3F9B1B645%7DImg100.jpg","source":"libby"},{"title":"Divorced and Deadly","author":"Josephine Cox","series":"","format":"audio","status":"finished","finished":"2017-11-28","cover":"https://img1.od-cdn.com/ImageType-100/1881-1/%7BF20B8D67-3F7C-4E1D-B56E-97A4852840E1%7DImg100.jpg","source":"libby"},{"title":"The Gift","author":"Cecelia Ahern","series":"","format":"audio","status":"finished","finished":"2017-11-28","cover":"https://img1.od-cdn.com/ImageType-100/1881-1/%7B80D19F3F-FD65-450E-8FC1-F71DEE8A9CD6%7DImg100.jpg","source":"libby"},{"title":"Someone Special","author":"Sheila O'Flanagan","series":"","format":"audio","status":"finished","finished":"2017-11-22","cover":"https://img3.od-cdn.com/ImageType-100/1881-1/%7BE3F9B441-ACE4-4B0F-9EDC-3E7DD4C37469%7DImg100.jpg","source":"libby"},{"title":"The Perfect Man","author":"Sheila O'Flanagan","series":"","format":"audio","status":"finished","finished":"2017-11-14","cover":"https://img2.od-cdn.com/ImageType-100/1881-1/%7B67EFEA1A-CC8C-42FC-B8B9-3F39E6515C0A%7DImg100.jpg","source":"libby"},{"title":"Meet Me at Beachcomber Bay","author":"Jill Mansell","series":"","format":"audio","status":"finished","finished":"2017-11-04","cover":"https://img1.od-cdn.com/ImageType-100/1219-1/%7B5FB09B9F-6CD9-44C0-B84E-C1E0660FB917%7DImg100.jpg","source":"libby"},{"title":"Suddenly Single","author":"Sheila O'Flanagan","series":"","format":"audio","status":"finished","finished":"2017-11-03","cover":"https://img3.od-cdn.com/ImageType-100/1881-1/%7B44E83008-EB6D-47CA-AB00-A0BB44B8E8F9%7DImg100.jpg","source":"libby"},{"title":"All Our Wrong Todays","author":"Elan Mastai","series":"","format":"audio","status":"finished","finished":"2017-10-31","cover":"https://img1.od-cdn.com/ImageType-100/0290-1/%7B4B469922-AC56-4475-B1F2-B401746BB1A8%7DImg100.jpg","source":"libby"},{"title":"Solo","author":"Jill Mansell","series":"","format":"audio","status":"finished","finished":"2017-10-28","cover":"https://img2.od-cdn.com/ImageType-100/1219-1/%7B7C3F781B-8329-48AB-9D81-555AA7E741C5%7DImg100.jpg","source":"libby"},{"title":"Ever After","author":"Jude Deveraux","series":"","format":"audio","status":"finished","finished":"2017-10-28","cover":"https://img3.od-cdn.com/ImageType-100/1191-1/%7B139BDDFB-DA63-44A7-A2FD-0C94AD70C1B0%7DImg100.jpg","source":"libby"}];
-const LIBBY_FLAG="libby_imported_v1";
-
-/* ============ STATE ============ */
-let books = [];       // array of {id, ...}
-let releases = [];
-let collapsedGroups = new Set();   // series/author group names currently collapsed
-let dismissedReleases = new Set();  // release keys the user has hidden
-let catchup = [];   // books to catch up on, from the catchup script
-const grid=document.getElementById('grid'), sortSel=document.getElementById('sort');
-const MONTHS=["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"];
-
-function stars(n){return "★".repeat(n)+"☆".repeat(5-n)}
-function toast(msg){const t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2200);}
-function esc(s){return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');}
-
-/* ============ LOAD FROM FIREBASE ============ */
-async function load(){
-  grid.innerHTML='<div class="loading">Opening the shelf…</div>';
-  try{
-    const [bRes,rRes]=await Promise.all([fetch(BOOKS_URL),fetch(RELEASES_URL)]);
-    const bData=await bRes.json(), rData=await rRes.json();
-    books    = bData ? Object.entries(bData).map(([id,v])=>({id,...v})) : [];
-    releases = rData ? Object.entries(rData).map(([id,v])=>({id,...v})) : [];
-    try{
-      const cRes=await fetch(DB+'/catchup.json');
-      const cData=await cRes.json();
-      catchup = cData ? Object.entries(cData).map(([id,v])=>({id,...v})) : [];
-    }catch(e){ catchup=[]; }
-    try{
-      const dRes=await fetch(DB+'/dismissedReleases.json');
-      const dData=await dRes.json();
-      dismissedReleases = dData ? new Set(Object.keys(dData)) : new Set();
-    }catch(e){ dismissedReleases=new Set(); }
-  }catch(e){
-    console.error(e);
-    grid.innerHTML='<div class="empty">Couldn\'t reach the shelf. Check your connection and refresh.</div>';
-    return;
-  }
-  renderBooks();
-  renderReleases();
-  renderCatchup();
-  await importLibby();  // one-time bulk import of Libby history (finish before healing)
-  seedAuthors();  // seed followed-authors from shelf (once)
-  healSeries();   // assign series + numbers from the map
-  applyOverrides(); // force manual corrections over any wrong auto-match
-  healCovers();   // fill any missing covers from the browser
+  if (!res.ok) { console.error(`HC ${res.status}`, (await res.text()).slice(0, 300)); return null; }
+  const json = await res.json();
+  if (json.errors) { console.error('GraphQL errors:', JSON.stringify(json.errors).slice(0, 300)); return null; }
+  return json.data;
 }
 
-/* ============ RENDER LIBRARY ============ */
-function card(b){
-  const reading = b.status==='reading';
-  const num = b.seriesNum===0 ? `<span class="snum set">SET</span>` : (b.seriesNum ? `<span class="snum">#${b.seriesNum}</span>` : '');
-  return `<div class="book" data-id="${b.id}">
-      <div class="cover">
-        ${b.cover?`<img src="${esc(b.cover)}" alt="">`:`<div class="placeholder">&</div>`}
-        <button class="del" data-id="${b.id}" title="Remove">×</button>
-        <button class="fixcover" data-fix="${b.id}" title="${b.cover?'Wrong cover? Replace or clear it':'Add a cover URL'}">⟳</button>
-        <button class="editbtn" data-edit="${b.id}" title="Edit series/number">✎</button>
-        <span class="fmt ${b.format}">${b.format==='audio'?'AUDIO':'PRINT'}</span>
-        ${reading?`<span class="rdg">READING</span>`:`<span class="fin" title="Finished">✓</span>`}
-      </div>
-      <div class="meta">
-        <div class="t" title="${esc(b.title)}">${num}${esc(b.title)}</div>
-        <div class="a">${esc(b.author)}</div>
-        <button class="statusbtn ${reading?'reading':'done'}" data-toggle="${b.id}">${reading?'Mark finished':'✓ Finished'}</button>
-      </div>
-    </div>`;
+async function fbGet(path) { const r = await fetch(`${DB}/${path}.json`); return r.ok ? r.json() : null; }
+async function fbPatch(path, data) {
+  const r = await fetch(`${DB}/${path}.json`, {
+    method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data)
+  });
+  return r.ok;
 }
 
-function renderBooks(){
-  const key=sortSel.value;
-  document.getElementById('n').textContent=books.length;
-  if(!books.length){grid.innerHTML='<div class="empty">Your shelf is empty. Add your first book.</div>';return;}
+const SEARCH_QUERY = `
+query Search($q: String!) {
+  search(query: $q, query_type: "Book", per_page: 5, page: 1) { results }
+}`;
 
-  if(key==="author"||key==="series"){
-    const buckets={};
-    books.forEach(b=>{
-      const g = key==="series" ? (b.series||"— Standalone —") : b.author;
-      (buckets[g]=buckets[g]||[]).push(b);
-    });
-    const names=Object.keys(buckets).sort((a,b)=>{
-      if(a==="— Standalone —")return 1; if(b==="— Standalone —")return -1;
-      // series with catch-up books sort first
-      const aCu=catchup.filter(c=>(c.series||'')===a).length;
-      const bCu=catchup.filter(c=>(c.series||'')===b).length;
-      if(aCu && !bCu) return -1; if(!aCu && bCu) return 1;
-      return a.localeCompare(b);
-    });
-    grid.innerHTML = names.map(g=>{
-      const items=buckets[g].sort((a,b)=>{
-        if(key==="series"){
-          const an=(a.seriesNum!=null?a.seriesNum:999), bn=(b.seriesNum!=null?b.seriesNum:999);
-          if(an!==bn) return an-bn;
-        }
-        return (a.title).localeCompare(b.title);
-      });
-      const collapsed = collapsedGroups.has(g);
-      // for series view, show the author (from the first book) alongside the count
-      let sub = `${items.length} book${items.length>1?'s':''}`;
-      if(key==="series" && g!=="— Standalone —"){
-        const auth=(items[0].author||'').split(',')[0].trim();
-        if(auth) sub = `${esc(auth)} &middot; ${sub}`;
-        // show catch-up count if there are books waiting
-        const cuCount=catchup.filter(c=>(c.series||'')===g).length;
-        if(cuCount) sub += ` <span class="cubadge">+${cuCount} to read</span>`;
+// pull hit documents out of the Typesense results blob (defensive — shape may vary)
+function hitsFrom(results) {
+  if (!results) return [];
+  let r = results;
+  if (typeof r === 'string') { try { r = JSON.parse(r); } catch (e) { return []; } }
+  const hits = r.hits || (r.results && r.results[0] && r.results[0].hits) || [];
+  return hits.map(h => h.document || h).filter(Boolean);
+}
+
+// find a cover url inside a hit document (tries the common shapes)
+function coverFromHit(doc) {
+  const img = doc.image || doc.cached_image || (doc.featured_series && doc.featured_series.image);
+  if (!img) return '';
+  if (typeof img === 'string') { try { const p = JSON.parse(img); return p.url || ''; } catch (e) { return img.startsWith('http') ? img : ''; } }
+  return img.url || '';
+}
+
+// Open Library: search by title+author, return a verified cover URL or ''
+async function openLibraryCover(title, author) {
+  try {
+    const q = `title=${encodeURIComponent(title)}&author=${encodeURIComponent((author||'').split(',')[0])}`;
+    const res = await fetch(`https://openlibrary.org/search.json?${q}&fields=cover_i&limit=1`);
+    if (!res.ok) return '';
+    const data = await res.json();
+    const doc = data.docs && data.docs[0];
+    if (!doc || !doc.cover_i) return '';
+    return `https://covers.openlibrary.org/b/id/${doc.cover_i}-L.jpg`;
+  } catch (e) { return ''; }
+}
+
+// Google Books fallback
+async function googleCover(title, author) {
+  try {
+    const q = encodeURIComponent(`${title} ${(author||'').split(',')[0]}`);
+    const res = await fetch(`https://www.googleapis.com/books/v1/volumes?maxResults=1&q=${q}`);
+    if (!res.ok) return '';
+    const data = await res.json();
+    const v = data.items && data.items[0] && data.items[0].volumeInfo;
+    const img = v && v.imageLinks && (v.imageLinks.thumbnail || v.imageLinks.smallThumbnail);
+    return img ? img.replace('http://','https://').replace('&edge=curl','') : '';
+  } catch (e) { return ''; }
+}
+
+(async () => {
+  const booksRaw = await fbGet('books');
+  if (!booksRaw) { console.log('No books.'); return; }
+
+  const entries = Object.entries(booksRaw).filter(([id, b]) => {
+    const needsSeries = !(b.series && b.series.trim());
+    const goodCover = b.cover && (
+      b.cover.includes('hardcover.app') || b.cover.includes('openlibrary.org') ||
+      (b.cover.includes('media-amazon.com') && b.cover.includes('/images/I/')) ||
+      b.cover.includes('books.google')
+    );
+    if (!needsSeries && goodCover) return false;
+    return true;
+  });
+  console.log(`${entries.length} books still need series and/or cover (search pass)...`);
+  let seriesFilled = 0, coversFilled = 0, noHit = 0;
+
+  for (const [id, b] of entries) {
+   try {
+    const q = `${b.title} ${(b.author || '').split(',')[0]}`.trim();
+    const data = await hardcover(SEARCH_QUERY, { q });
+    await sleep(1300); // search bucket is stricter; pace gently
+
+    const hits = data ? hitsFrom(data.search && data.search.results) : [];
+    if (!hits.length) { noHit++; continue; }
+
+    // choose the hit whose author matches ours (fallback: first hit)
+    const myAuthor = norm((b.author || '').split(',')[0]);
+    let doc = hits.find(h => {
+      const names = [].concat(h.author_names || []).map(norm);
+      return !myAuthor || names.some(n => n && (n.includes(myAuthor) || myAuthor.includes(n)));
+    }) || hits[0];
+
+    const patch = {};
+    const isBoxset = /boxset|collection|books \d|vol\.|part (one|two|three)/i.test(b.title || '');
+
+    // series
+    if (!(b.series && b.series.trim()) && !isBoxset) {
+      const sName = (doc.featured_series && doc.featured_series.series_name)
+        || (Array.isArray(doc.series_names) ? doc.series_names[0] : doc.series_names);
+      if (sName) {
+        patch.series = sName;
+        const pos = doc.featured_series_position != null ? doc.featured_series_position
+                  : (doc.featured_series && doc.featured_series.position);
+        if (pos != null) patch.seriesNum = pos;
       }
-      const head=`<div class="group-h ${collapsed?'collapsed':''}" data-group="${esc(g)}"><span class="caret">▾</span>${esc(g)}<span class="c">${sub}</span></div>`;
-      return head + (collapsed ? '' : items.map(card).join(''));
-    }).join('');
-    // wire collapse toggles
-    grid.querySelectorAll('.group-h').forEach(h=>h.onclick=()=>{
-      const g=h.dataset.group;
-      if(collapsedGroups.has(g)) collapsedGroups.delete(g); else collapsedGroups.add(g);
-      renderBooks();
-    });
-  } else {
-    const sorted=[...books].sort((a,b)=>{
-      if(key==="finished")return (b.finished||"").localeCompare(a.finished||"");
-      return (a[key]||"").localeCompare(b[key]||"");
-    });
-    grid.innerHTML = sorted.map(card).join('');
-  }
-  // wire buttons
-  grid.querySelectorAll('.del').forEach(btn=>btn.onclick=()=>removeBook(btn.dataset.id));
-  grid.querySelectorAll('[data-toggle]').forEach(btn=>btn.onclick=()=>toggleStatus(btn.dataset.toggle));
-  grid.querySelectorAll('[data-fix]').forEach(btn=>btn.onclick=()=>clearCover(btn.dataset.fix));
-  grid.querySelectorAll('[data-edit]').forEach(btn=>btn.onclick=()=>openEdit(btn.dataset.edit));
-}
-
-function releaseKey(r){ return (r.author+'_'+r.title).toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'').slice(0,180); }
-
-function renderReleases(){
-  const list=document.getElementById('rellist');
-  const now=new Date();
-  const visible=releases.filter(r=>!dismissedReleases.has(releaseKey(r)));
-  const sorted=[...visible].sort((a,b)=>(a.date||"").localeCompare(b.date||""));
-  document.getElementById('rn').textContent=visible.length;
-  if(!sorted.length){list.innerHTML='<div class="empty">Nothing on the horizon yet. Follow some authors and releases will appear here.</div>';return;}
-  list.innerHTML=sorted.map(r=>{
-    const dt=new Date(r.date+"T00:00:00");
-    const days=Math.ceil((dt-now)/86400000);
-    const away = days<=0?"out now":days<=30?`${days} days`:`${Math.round(days/30)} months`;
-    const k=releaseKey(r);
-    const inner=`<div class="rel ${days<=30?'soon':''}">
-      <div class="date"><div class="d">${dt.getDate()}</div><div class="m">${MONTHS[dt.getMonth()]}</div></div>
-      <div class="info">
-        ${r.slug?`<a href="https://hardcover.app/books/${esc(r.slug)}" target="_blank" style="text-decoration:none;color:inherit"><div class="t">${esc(r.title)}</div><div class="a">${esc(r.author)}</div></a>`:`<div class="t">${esc(r.title)}</div><div class="a">${esc(r.author)}</div>`}
-      </div>
-      <div class="away">${away}<br><span style="opacity:.6">${dt.getFullYear()}</span></div>
-      <button class="reldismiss" data-relkey="${k}" title="Not interested">×</button>
-    </div>`;
-    return inner;
-  }).join('');
-  list.querySelectorAll('[data-relkey]').forEach(btn=>btn.onclick=()=>dismissRelease(btn.dataset.relkey));
-}
-
-async function dismissRelease(key){
-  dismissedReleases.add(key);
-  try{ await fetch(DB+'/dismissedReleases/'+key+'.json',{method:'PUT',headers:{'Content-Type':'application/json'},body:'true'}); }catch(e){}
-  renderReleases();
-  toast('Hidden from radar');
-}
-
-/* ============ CATCH UP ============ */
-function renderCatchup(){
-  const grid=document.getElementById('catchupgrid');
-  document.getElementById('cn').textContent=catchup.length;
-  if(!catchup.length){grid.innerHTML='<div class="empty">Nothing to catch up on — you\'re up to date on your series. Run the Catch Up sync to refresh.</div>';return;}
-  // group by series, ordered by number
-  const buckets={};
-  catchup.forEach(b=>{(buckets[b.series||'—']=buckets[b.series||'—']||[]).push(b);});
-  const names=Object.keys(buckets).sort((a,b)=>a.localeCompare(b));
-  grid.innerHTML = names.map(g=>{
-    const items=buckets[g].sort((a,b)=>(a.seriesNum||999)-(b.seriesNum||999));
-    const auth=(items[0].author||'').split(',')[0].trim();
-    const sub = auth ? `${esc(auth)} &middot; ${items.length}` : `${items.length}`;
-    return `<div class="group-h" style="cursor:default"><span style="opacity:.4">▾</span>${esc(g)}<span class="c">${sub}</span></div>`
-      + items.map(catchupCard).join('');
-  }).join('');
-  grid.querySelectorAll('[data-add]').forEach(btn=>btn.onclick=()=>addToLibrary(btn.dataset.add));
-}
-
-function catchupCard(b){
-  const num = b.seriesNum ? `<span class="snum">#${b.seriesNum}</span>` : '';
-  const yr = b.releaseDate ? b.releaseDate.slice(0,4) : '';
-  return `<div class="book">
-      <div class="cover">
-        ${b.cover?`<img src="${esc(b.cover)}" alt="">`:`<div class="placeholder">&</div>`}
-        ${yr?`<span class="fmt" style="color:var(--paper-dim)">${yr}</span>`:''}
-      </div>
-      <div class="meta">
-        <div class="t" title="${esc(b.title)}">${num}${esc(b.title)}</div>
-        <div class="a">${esc(b.author)}</div>
-        <button class="statusbtn reading" data-add="${b.id}">+ Add to library</button>
-      </div>
-    </div>`;
-}
-
-// add a catch-up book onto the shelf (as reading), remove it from catch-up
-async function addToLibrary(catchupId){
-  const c=catchup.find(x=>x.id===catchupId); if(!c)return;
-  const rec={title:c.title,author:c.author,series:c.series||'',seriesNum:(c.seriesNum!=null?c.seriesNum:null),
-             format:'audio',status:'reading',finished:new Date().toISOString().slice(0,10),cover:c.cover||''};
-  try{
-    const res=await fetch(BOOKS_URL,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(rec)});
-    if(!res.ok)throw new Error('HTTP '+res.status);
-    const {name}=await res.json();
-    books.push({id:name,...rec});
-    // remove from catchup node + local
-    await fetch(DB+'/catchup/'+catchupId+'.json',{method:'DELETE'});
-    catchup=catchup.filter(x=>x.id!==catchupId);
-    renderCatchup(); renderBooks();
-    toast('Added to your library');
-  }catch(e){console.error(e);toast("Couldn't add");}
-}
-
-/* ============ TABS ============ */
-document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{
-  document.querySelectorAll('.tab').forEach(x=>x.classList.remove('on'));
-  document.querySelectorAll('.view').forEach(x=>x.classList.remove('on'));
-  t.classList.add('on');
-  document.getElementById(t.dataset.v).classList.add('on');
-  if(t.dataset.v==='radar') loadAuthors();   // refresh follow list when opening radar
-});
-
-// edit book details
-let editingId=null;
-const editOverlay=document.getElementById('editoverlay');
-function openEdit(id){
-  const b=books.find(x=>x.id===id); if(!b)return;
-  editingId=id;
-  document.getElementById('e-title').value=b.title||'';
-  document.getElementById('e-author').value=b.author||'';
-  document.getElementById('e-series').value=b.series||'';
-  document.getElementById('e-num').value=(b.seriesNum!=null?b.seriesNum:'');
-  document.getElementById('e-isbn').value='';
-  editOverlay.classList.add('on');
-}
-document.getElementById('e-cancel').onclick=()=>{editOverlay.classList.remove('on');editingId=null;};
-editOverlay.onclick=e=>{if(e.target===editOverlay){editOverlay.classList.remove('on');editingId=null;}};
-document.getElementById('e-save').onclick=async()=>{
-  if(!editingId)return;
-  const b=books.find(x=>x.id===editingId); if(!b)return;
-  const patch={
-    title:document.getElementById('e-title').value.trim(),
-    author:document.getElementById('e-author').value.trim(),
-    series:document.getElementById('e-series').value.trim(),
-    seriesNum:parseInt(document.getElementById('e-num').value)||null
-  };
-  if(patch.series===''&&patch.seriesNum) patch.seriesNum=null;
-  // ISBN → Amazon cover
-  const isbnRaw=document.getElementById('e-isbn').value.trim().replace(/[^0-9Xx]/g,'');
-  if(isbnRaw){
-    let isbn10=isbnRaw;
-    if(isbnRaw.length===13 && isbnRaw.startsWith('978')){
-      const core=isbnRaw.slice(3,12);
-      let sum=0; for(let i=0;i<9;i++) sum+=parseInt(core[i])*(10-i);
-      const chk=(11-(sum%11))%11;
-      isbn10=core+(chk===10?'X':String(chk));
     }
-    if(isbn10.length===10) patch.cover='https://m.media-amazon.com/images/P/'+isbn10+'.jpg';
-  }
-  const btn=document.getElementById('e-save');
-  btn.disabled=true;btn.textContent='Saving…';
-  try{
-    const res=await fetch(DB+'/books/'+editingId+'.json',{method:'PATCH',
-      headers:{'Content-Type':'application/json'},body:JSON.stringify(patch)});
-    if(!res.ok)throw new Error('HTTP '+res.status);
-    Object.assign(b,patch);
-    renderBooks();
-    editOverlay.classList.remove('on');editingId=null;
-    toast('Updated');
-  }catch(e){console.error(e);toast("Couldn't save");}
-  finally{btn.disabled=false;btn.textContent='Save';}
-};
 
-// catch-up manual add
-document.getElementById('addcatchup').onclick=()=>{
-  const f=document.getElementById('catchupform');
-  f.style.display=f.style.display==='none'?'block':'none';
-};
-document.getElementById('cu-cancel').onclick=()=>{document.getElementById('catchupform').style.display='none';};
-document.getElementById('cu-save').onclick=async()=>{
-  const title=document.getElementById('cu-title').value.trim();
-  const author=document.getElementById('cu-author').value.trim();
-  const series=document.getElementById('cu-series').value.trim();
-  const num=parseInt(document.getElementById('cu-num').value)||null;
-  if(!title){document.getElementById('cu-title').focus();return;}
-  const rec={title,author,series,seriesNum:num,slug:'',cover:'',releaseDate:''};
-  try{
-    const res=await fetch(DB+'/catchup.json',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(rec)});
-    if(!res.ok)throw new Error('HTTP '+res.status);
-    const {name}=await res.json();
-    catchup.push({id:name,...rec});
-    renderCatchup();
-    document.getElementById('catchupform').style.display='none';
-    ['cu-title','cu-author','cu-series','cu-num'].forEach(id=>{document.getElementById(id).value='';});
-    toast('Added to Catch Up');
-  }catch(e){console.error(e);toast("Couldn't add");}
-};
-
-// author manage panel
-document.getElementById('managebtn').onclick=()=>{
-  const p=document.getElementById('authorpanel');
-  p.style.display = p.style.display==='none' ? 'block' : 'none';
-};
-document.getElementById('authoradd').onclick=()=>{
-  const inp=document.getElementById('authorinput');
-  followAuthor(inp.value); inp.value='';
-};
-document.getElementById('authorinput').addEventListener('keydown',e=>{
-  if(e.key==='Enter'){ followAuthor(e.target.value); e.target.value=''; }
-});
-sortSel.onchange=renderBooks;
-
-// collapse/expand all groups (only meaningful in grouped views)
-document.getElementById('collapseall').onclick=(e)=>{
-  const key=sortSel.value;
-  if(key!=='author'&&key!=='series'){ toast('Switch to a grouped view first'); return; }
-  const groupNames=new Set(books.map(b=>key==='series'?(b.series||'— Standalone —'):b.author));
-  if(collapsedGroups.size>=groupNames.size){ collapsedGroups.clear(); e.target.textContent='Collapse all'; }
-  else { collapsedGroups=new Set(groupNames); e.target.textContent='Expand all'; }
-  renderBooks();
-};
-
-/* ============ ADD-BOOK MODAL ============ */
-const overlay=document.getElementById('overlay');
-const fTitle=document.getElementById('f-title'), fAuthor=document.getElementById('f-author'),
-      fSeries=document.getElementById('f-series'), fFormat=document.getElementById('f-format'),
-      fFinished=document.getElementById('f-finished');
-const preview=document.getElementById('preview'), pCover=document.getElementById('p-cover'),
-      pTitle=document.getElementById('p-title'), pAuthor=document.getElementById('p-author');
-const fStatus=document.getElementById('f-status');
-let chosenCover='';
-
-function openModal(){
-  fTitle.value='';fAuthor.value='';fSeries.value='';fFormat.value='audio';fStatus.value='finished';
-  fFinished.value=new Date().toISOString().slice(0,10);
-  chosenCover='';
-  preview.classList.remove('show');
-  overlay.classList.add('on');
-  setTimeout(()=>fTitle.focus(),50);
-}
-function closeModal(){overlay.classList.remove('on');}
-document.getElementById('add').onclick=openModal;
-document.getElementById('cancel').onclick=closeModal;
-overlay.onclick=e=>{if(e.target===overlay)closeModal();};
-
-// Google Books lookup (debounced) as you type the title
-let lookupTimer=null;
-fTitle.oninput=()=>{
-  clearTimeout(lookupTimer);
-  const q=fTitle.value.trim();
-  if(q.length<3){preview.classList.remove('show');return;}
-  lookupTimer=setTimeout(()=>lookupBook(q),450);
-};
-async function lookupBook(q){
-  try{
-    const res=await fetch('https://www.googleapis.com/books/v1/volumes?maxResults=1&q='+encodeURIComponent(q));
-    const data=await res.json();
-    const v=data.items&&data.items[0]&&data.items[0].volumeInfo;
-    if(!v){preview.classList.remove('show');return;}
-    const img=v.imageLinks?(v.imageLinks.thumbnail||v.imageLinks.smallThumbnail):'';
-    chosenCover = img ? img.replace('http://','https://').replace('&edge=curl','') : '';
-    if(!fAuthor.value && v.authors) fAuthor.value=v.authors.join(', ');
-    pCover.src=chosenCover||'';
-    pCover.style.display=chosenCover?'block':'none';
-    pTitle.textContent=v.title||q;
-    pAuthor.textContent=v.authors?v.authors.join(', '):'';
-    preview.classList.add('show');
-  }catch(e){console.error(e);}
-}
-
-// save to Firebase
-document.getElementById('save').onclick=async()=>{
-  const title=fTitle.value.trim(), author=fAuthor.value.trim();
-  if(!title){fTitle.focus();return;}
-  const btn=document.getElementById('save');
-  btn.disabled=true;btn.textContent='Saving…';
-  const rec={title,author,series:fSeries.value.trim(),format:fFormat.value,
-             status:fStatus.value,finished:fFinished.value,cover:chosenCover};
-  try{
-    const res=await fetch(BOOKS_URL,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(rec)});
-    if(!res.ok)throw new Error('HTTP '+res.status);
-    const {name}=await res.json();       // Firebase returns the new key
-    books.push({id:name,...rec});
-    renderBooks();
-    closeModal();
-    toast('Added to your shelf');
-  }catch(e){
-    console.error(e);toast("Couldn't save — try again");
-  }finally{
-    btn.disabled=false;btn.textContent='Add to shelf';
-  }
-};
-
-// wrong cover: paste a replacement URL, or leave blank to clear + let Hardcover refill next sync
-async function clearCover(id){
-  const b=books.find(x=>x.id===id); if(!b)return;
-  const url=prompt(
-    'Paste a cover image URL (Amazon or Hardcover work best — right-click the cover, "Copy image address").\n\nLeave blank to just clear it and let the next sync refill it from Hardcover.',
-    ''
-  );
-  if(url===null) return; // cancelled
-  const trimmed=url.trim();
-  try{
-    let patch;
-    if(trimmed){
-      // manual URL provided — use it, drop any cleared flag
-      patch={cover:trimmed, coverCleared:null};
-    }else{
-      // blank — clear and flag so browser healing skips it (Hardcover refills on next run)
-      patch={cover:'', coverCleared:true};
+    // cover: Hardcover hit → Open Library (verified) → Google Books
+    const goodCover = b.cover && (
+      b.cover.includes('hardcover.app') || b.cover.includes('openlibrary.org') ||
+      (b.cover.includes('media-amazon.com') && b.cover.includes('/images/I/')) ||
+      b.cover.includes('books.google')
+    );
+    if (!goodCover) {
+      let cov = coverFromHit(doc);
+      if (!cov) { cov = await openLibraryCover(b.title, b.author); await sleep(1100); }
+      if (!cov) { cov = await googleCover(b.title, b.author); await sleep(1100); }
+      if (cov) { patch.cover = cov; if (b.coverCleared) patch.coverCleared = null; }
     }
-    const res=await fetch(DB+'/books/'+id+'.json',{method:'PATCH',
-      headers:{'Content-Type':'application/json'},body:JSON.stringify(patch)});
-    if(!res.ok)throw new Error('HTTP '+res.status);
-    b.cover=trimmed; b.coverCleared=trimmed?false:true;
-    renderBooks();
-    toast(trimmed?'Cover updated':'Cover cleared — refills from Hardcover on next sync');
-  }catch(e){console.error(e);toast("Couldn't update cover");}
-}
 
-// delete from Firebase
-async function removeBook(id){
-  if(!confirm('Remove this book from your shelf?'))return;
-  try{
-    const res=await fetch(DB+'/books/'+id+'.json',{method:'DELETE'});
-    if(!res.ok)throw new Error('HTTP '+res.status);
-    books=books.filter(b=>b.id!==id);
-    renderBooks();
-    toast('Removed');
-  }catch(e){console.error(e);toast("Couldn't remove — try again");}
-}
-
-// toggle a book between reading and finished (PATCH just the changed fields)
-async function toggleStatus(id){
-  const b=books.find(x=>x.id===id); if(!b)return;
-  const now = b.status==='finished' ? 'reading' : 'finished';
-  const patch = {status:now};
-  if(now==='finished') patch.finished=new Date().toISOString().slice(0,10);
-  try{
-    const res=await fetch(DB+'/books/'+id+'.json',{method:'PATCH',
-      headers:{'Content-Type':'application/json'},body:JSON.stringify(patch)});
-    if(!res.ok)throw new Error('HTTP '+res.status);
-    b.status=now; if(patch.finished)b.finished=patch.finished;
-    renderBooks();
-    toast(now==='finished'?'Marked finished':'Back to reading');
-  }catch(e){console.error(e);toast("Couldn't update — try again");}
-}
-
-// fill in any missing covers via Google Books (paced to avoid 429 rate-limiting).
-// Heals a few per load, saves each to Firebase, so it resumes across reloads.
-let healingCovers=false;
-async function healCovers(){
-  if(healingCovers) return;
-  healingCovers=true;
-  const missing=books.filter(b=>!b.cover && !b.coverCleared);
-  let consecutive429=0;
-  for(const b of missing){
-    try{
-      const q=encodeURIComponent(b.title+' '+(b.author||'').split(',')[0]);
-      const res=await fetch('https://www.googleapis.com/books/v1/volumes?maxResults=1&q='+q);
-      if(res.status===429){
-        consecutive429++;
-        // back off hard: wait longer each time, and bail after several in a row
-        await new Promise(r=>setTimeout(r,3000*consecutive429));
-        if(consecutive429>=4) break;   // give up this session; resumes next reload
-        continue;
-      }
-      consecutive429=0;
-      const data=await res.json();
-      const v=data.items&&data.items[0]&&data.items[0].volumeInfo;
-      const img=v&&v.imageLinks&&(v.imageLinks.thumbnail||v.imageLinks.smallThumbnail);
-      if(!img){ await new Promise(r=>setTimeout(r,1500)); continue; }
-      const cover=img.replace('http://','https://').replace('&edge=curl','');
-      await fetch(DB+'/books/'+b.id+'.json',{method:'PATCH',
-        headers:{'Content-Type':'application/json'},body:JSON.stringify({cover})});
-      b.cover=cover;
-      renderBooks();
-      await new Promise(r=>setTimeout(r,1600));  // ~1.6s between lookups, well under the limit
-    }catch(e){ await new Promise(r=>setTimeout(r,1500)); }
-  }
-  healingCovers=false;
-}
-
-// fill in series + number from the built-in map, save back to Firebase
-// one-time bulk import of Libby borrowing history (runs once, then flags itself done)
-async function importLibby(){
-  // guard: only run once ever, tracked in Firebase so it's per-database not per-device
-  try{
-    const flagRes=await fetch(DB+'/flags/'+LIBBY_FLAG+'.json');
-    if(await flagRes.json()===true) return;   // already imported
-  }catch(e){ /* proceed */ }
-
-  // dedupe against what's already on the shelf (normalise title)
-  const norm=t=>t.toLowerCase().replace(/\s+/g,' ').replace(/[:,].*$/,'').trim();
-  const have=new Set(books.map(b=>norm(b.title)));
-  const toAdd=LIBBY_IMPORT.filter(b=>!have.has(norm(b.title)));
-
-  if(!toAdd.length){ 
-    await fetch(DB+'/flags/'+LIBBY_FLAG+'.json',{method:'PUT',headers:{'Content-Type':'application/json'},body:'true'});
-    return;
+    if (!Object.keys(patch).length) continue;
+    const ok = await fbPatch('books/' + id, patch);
+    if (ok) {
+      if (patch.series) seriesFilled++;
+      if (patch.cover) coversFilled++;
+      console.log(`  ${b.title}${patch.series ? ' → ' + patch.series + (patch.seriesNum != null ? ' #' + patch.seriesNum : '') : ''}${patch.cover ? ' [cover]' : ''}`);
+    }
+   } catch (e) {
+    console.log(`  (skipped ${b.title}: ${e.code || e.message})`);
+    await sleep(2000); // brief pause after a network hiccup
+   }
   }
 
-  toast('Importing your Libby history…');
-  let added=0;
-  for(const rec of toAdd){
-    try{
-      const res=await fetch(BOOKS_URL,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(rec)});
-      if(!res.ok) continue;
-      const {name}=await res.json();
-      books.push({id:name,...rec});
-      added++;
-      if(added%10===0) renderBooks();   // repaint every 10 so you see progress
-    }catch(e){ /* skip failures */ }
-  }
-  renderBooks();
-  // set the flag so this never runs again
-  try{ await fetch(DB+'/flags/'+LIBBY_FLAG+'.json',{method:'PUT',headers:{'Content-Type':'application/json'},body:'true'}); }catch(e){}
-  toast(`Added ${added} books from Libby`);
-}
-
-// seed followedAuthors from the shelf, once (hybrid: auto-seed, user edits after)
-async function seedAuthors(){
-  try{
-    const flag = await (await fetch(DB+'/flags/authors_seeded_v1.json')).json();
-    if(flag===true) return;
-  }catch(e){}
-  // unique authors from shelf, split multi-author strings on comma
-  const set=new Set();
-  books.forEach(b=>String(b.author||'').split(',').forEach(a=>{a=a.trim();if(a)set.add(a);}));
-  const obj={};
-  [...set].forEach((a,i)=>obj['a'+i]=a);
-  try{
-    await fetch(DB+'/followedAuthors.json',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify(obj)});
-    await fetch(DB+'/flags/authors_seeded_v1.json',{method:'PUT',headers:{'Content-Type':'application/json'},body:'true'});
-  }catch(e){}
-}
-
-// load followed authors into the manage panel
-let followedAuthors={};  // {key: name}
-async function loadAuthors(){
-  try{
-    const d=await (await fetch(DB+'/followedAuthors.json')).json();
-    followedAuthors = d && typeof d==='object' ? d : {};
-  }catch(e){ followedAuthors={}; }
-  renderAuthors();
-}
-function renderAuthors(){
-  const box=document.getElementById('authorlist');
-  if(!box) return;
-  const entries=Object.entries(followedAuthors).sort((a,b)=>a[1].localeCompare(b[1]));
-  document.getElementById('authorcount').textContent=entries.length;
-  box.innerHTML = entries.length
-    ? entries.map(([k,name])=>`<span class="chip">${esc(name)}<button data-akey="${k}" title="Unfollow">×</button></span>`).join('')
-    : '<div class="empty" style="padding:1.5rem">No authors followed yet.</div>';
-  box.querySelectorAll('[data-akey]').forEach(btn=>btn.onclick=()=>unfollowAuthor(btn.dataset.akey));
-}
-async function unfollowAuthor(key){
-  try{
-    await fetch(DB+'/followedAuthors/'+key+'.json',{method:'DELETE'});
-    delete followedAuthors[key];
-    renderAuthors();
-  }catch(e){ toast("Couldn't remove"); }
-}
-async function followAuthor(name){
-  name=name.trim(); if(!name) return;
-  if(Object.values(followedAuthors).some(n=>n.toLowerCase()===name.toLowerCase())){toast('Already following');return;}
-  try{
-    const res=await fetch(DB+'/followedAuthors.json',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(name)});
-    const {name:key}=await res.json();
-    followedAuthors[key]=name;
-    renderAuthors();
-    toast('Following '+name);
-  }catch(e){ toast("Couldn't add"); }
-}
-
-// apply manual series corrections — these WIN over any auto-matched series
-async function applyOverrides(){
-  let changed=false;
-  for(const b of books){
-    const ov=SERIES_OVERRIDES[b.title];
-    if(!ov) continue;
-    const [series,num]=ov;
-    if(b.series===series && b.seriesNum===num) continue; // already correct
-    try{
-      await fetch(DB+'/books/'+b.id+'.json',{method:'PATCH',
-        headers:{'Content-Type':'application/json'},body:JSON.stringify({series,seriesNum:num})});
-      b.series=series; b.seriesNum=num; changed=true;
-    }catch(e){}
-  }
-  if(changed) renderBooks();
-}
-
-async function healSeries(){
-  const todo=books.filter(b=>!b.series && SERIES_MAP[b.title]);
-  // also update any already-healed boxset that's missing its coversUpTo
-  const boxsetFix=books.filter(b=>b.series && SERIES_MAP[b.title] && SERIES_MAP[b.title][2]!=null && b.coversUpTo==null);
-  for(const b of boxsetFix){
-    const [,,coversUpTo]=SERIES_MAP[b.title];
-    try{
-      await fetch(DB+'/books/'+b.id+'.json',{method:'PATCH',
-        headers:{'Content-Type':'application/json'},body:JSON.stringify({coversUpTo})});
-      b.coversUpTo=coversUpTo;
-    }catch(e){}
-  }
-  for(const b of todo){
-    const [series,num,coversUpTo]=SERIES_MAP[b.title];
-    try{
-      const patch={series,seriesNum:num};
-      if(coversUpTo!=null) patch.coversUpTo=coversUpTo;
-      await fetch(DB+'/books/'+b.id+'.json',{method:'PATCH',
-        headers:{'Content-Type':'application/json'},body:JSON.stringify(patch)});
-      b.series=series; b.seriesNum=num; if(coversUpTo!=null) b.coversUpTo=coversUpTo;
-    }catch(e){/* skip */}
-  }
-  if(todo.length) renderBooks();
-}
-
-/* ============ GO ============ */
-load();
-</script>
-</body>
-</html>
+  console.log(`Done. Series: +${seriesFilled}, covers: +${coversFilled}, no match: ${noHit}, of ${entries.length}.`);
+})().catch(e => { console.error(e); process.exit(1); });

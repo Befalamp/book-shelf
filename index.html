@@ -247,15 +247,18 @@
     backdrop-filter:blur(2px);z-index:2;
   }
   .cover:hover .fixcover{display:flex}
+  .cover:hover .editbtn{display:flex}
+  .cover:hover .del{display:flex}
+  @media (hover:none){
+    .book .fixcover, .book .editbtn, .book .del{display:flex}
+  }
   .book .editbtn{
     position:absolute;bottom:.5rem;right:.5rem;width:24px;height:24px;border-radius:50%;
     background:rgba(22,27,33,.82);color:var(--paper-dim);border:none;cursor:pointer;
     font-size:.85rem;line-height:1;display:none;align-items:center;justify-content:center;
     backdrop-filter:blur(2px);z-index:2;
   }
-  .cover:hover .editbtn{display:flex}
   .editbtn:hover{color:var(--gilt)}
-  .cover:hover .del{display:flex}
   .toast{
     position:fixed;bottom:2rem;left:50%;transform:translateX(-50%) translateY(160%);
     background:var(--sage);color:var(--ink);font-weight:600;font-size:.86rem;
@@ -604,6 +607,7 @@ function renderCatchup(){
       + items.map(catchupCard).join('');
   }).join('');
   grid.querySelectorAll('[data-add]').forEach(btn=>btn.onclick=()=>addToLibrary(btn.dataset.add));
+  grid.querySelectorAll('[data-fixcu]').forEach(btn=>btn.onclick=()=>clearCatchupCover(btn.dataset.fixcu));
 }
 
 function catchupCard(b){
@@ -612,6 +616,7 @@ function catchupCard(b){
   return `<div class="book">
       <div class="cover">
         ${b.cover?`<img src="${esc(b.cover)}" alt="">`:`<div class="placeholder">&</div>`}
+        <button class="fixcover" data-fixcu="${b.id}" title="${b.cover?'Wrong cover? Replace or clear it':'Add a cover URL'}">⟳</button>
         ${yr?`<span class="fmt" style="color:var(--paper-dim)">${yr}</span>`:''}
       </div>
       <div class="meta">
@@ -620,6 +625,26 @@ function catchupCard(b){
         <button class="statusbtn reading" data-add="${b.id}">+ Add to library</button>
       </div>
     </div>`;
+}
+
+// fix cover on a catch-up entry (same prompt as library, writes to /catchup node)
+async function clearCatchupCover(id){
+  const b=catchup.find(x=>x.id===id); if(!b)return;
+  const url=prompt(
+    'Paste a cover image URL (Amazon or Hardcover — right-click the cover, "Copy image address").\n\nLeave blank to just clear it.',
+    ''
+  );
+  if(url===null) return;
+  const trimmed=url.trim();
+  try{
+    const patch = trimmed ? {cover:trimmed} : {cover:''};
+    const res=await fetch(DB+'/catchup/'+id+'.json',{method:'PATCH',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify(patch)});
+    if(!res.ok)throw new Error('HTTP '+res.status);
+    b.cover=trimmed;
+    renderCatchup();
+    toast(trimmed?'Cover updated':'Cover cleared');
+  }catch(e){console.error(e);toast("Couldn't update cover");}
 }
 
 // add a catch-up book onto the shelf (as reading), remove it from catch-up

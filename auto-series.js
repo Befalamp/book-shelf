@@ -70,6 +70,17 @@ query BookSeries($title: String!) {
 // normalise for author comparison
 const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
+// strip Audible-style suffixes that other databases don't use
+function cleanTitle(t) {
+  return String(t || '')
+    .replace(/,\s*Book\s*\d+$/i, '')           // ", Book 2"
+    .replace(/:\s*A\s+[\w\s]+(?:Thriller|Mystery|Novel)$/i, '')  // ": A Scottish Crime Thriller"
+    .replace(/:\s*An\s+[\w\s]+(?:Thriller|Mystery|Novel)$/i, '') // ": An Alexander Gregory Thriller"
+    .replace(/:\s*Books?\s*\d[\d\-]*$/i, '')    // ": Books 1-3"
+    .replace(/,\s*Books?\s*\d[\d\-]*$/i, '')    // ", Books 1-3"
+    .trim();
+}
+
 (async () => {
   const booksRaw = await fbGet('books');
   if (!booksRaw) { console.log('No books in Firebase.'); return; }
@@ -83,6 +94,8 @@ const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim
         if (c && c.url) return c.url;
       } catch (e) {}
     }
+    // diagnostic: log what we got so we can fix the parser
+    console.log(`    [cover-debug] ${hb.title}: image=${JSON.stringify(hb.image)}, cached_image=${JSON.stringify(hb.cached_image)?.slice(0,150)}`);
     return '';
   }
 
@@ -131,8 +144,14 @@ const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim
   let seriesFilled = 0, coversFilled = 0;
 
   for (const [id, b] of entries) {
-    const data = await hardcover(SERIES_QUERY, { title: b.title });
+    // try exact title first, then cleaned (without Audible suffixes)
+    let data = await hardcover(SERIES_QUERY, { title: b.title });
     await sleep(1100);
+    const cleaned = cleanTitle(b.title);
+    if ((!data || !data.books || !data.books.length) && cleaned !== b.title) {
+      data = await hardcover(SERIES_QUERY, { title: cleaned });
+      await sleep(1100);
+    }
     if (!data || !data.books || !data.books.length) continue;
 
     const myAuthor = norm((b.author || '').split(',')[0]);
@@ -168,9 +187,11 @@ const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim
     );
     if (!goodCover) {
       let cov = coverFrom(chosen);
-      if (!cov) { cov = await openLibraryCover(b.title, b.author); await sleep(1100); }
-      if (!cov) { cov = await googleCover(b.title, b.author); await sleep(1100); }
+      let src = cov ? 'hardcover' : '';
+      if (!cov) { cov = await openLibraryCover(cleanTitle(b.title), b.author); await sleep(1100); src = cov ? 'openlibrary' : ''; }
+      if (!cov) { cov = await googleCover(cleanTitle(b.title), b.author); await sleep(1100); src = cov ? 'google' : ''; }
       if (cov) { patch.cover = cov; if (b.coverCleared) patch.coverCleared = null; }
+      else { console.log(`    [no-cover] ${b.title} — all 3 sources failed`); }
     }
 
     if (!Object.keys(patch).length) continue;

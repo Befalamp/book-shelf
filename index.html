@@ -254,8 +254,9 @@
   .cover:hover .fixcover{display:flex}
   .cover:hover .editbtn{display:flex}
   .cover:hover .del{display:flex}
+  .cover:hover .amzbtn{display:flex}
   @media (hover:none){
-    .book .fixcover, .book .editbtn, .book .del{display:flex}
+    .book .fixcover, .book .editbtn, .book .del, .book .amzbtn{display:flex}
   }
   .book .editbtn{
     position:absolute;bottom:.5rem;right:.5rem;width:24px;height:24px;border-radius:50%;
@@ -264,6 +265,13 @@
     backdrop-filter:blur(2px);z-index:2;
   }
   .editbtn:hover{color:var(--gilt)}
+  .book .amzbtn{
+    position:absolute;bottom:.5rem;right:2.3rem;width:24px;height:24px;border-radius:50%;
+    background:rgba(22,27,33,.82);color:var(--gilt-soft);border:none;cursor:pointer;
+    font-size:.7rem;font-weight:700;line-height:1;display:none;align-items:center;justify-content:center;
+    backdrop-filter:blur(2px);z-index:2;font-family:'Inter',sans-serif;
+  }
+  .amzbtn:hover{color:var(--gilt)}
   .toast{
     position:fixed;bottom:2rem;left:50%;transform:translateX(-50%) translateY(160%);
     background:var(--sage);color:var(--ink);font-weight:600;font-size:.86rem;
@@ -491,6 +499,7 @@ function card(b){
         <button class="del" data-id="${b.id}" title="Remove">×</button>
         <button class="fixcover" data-fix="${b.id}" title="${b.cover?'Wrong cover? Replace or clear it':'Add a cover URL'}">⟳</button>
         <button class="editbtn" data-edit="${b.id}" title="Edit series/number">✎</button>
+        <button class="amzbtn" data-amz="${b.id}" title="Fix cover via Amazon">A</button>
         <span class="fmt ${b.format}">${b.format==='audio'?'AUDIO':'PRINT'}</span>
         ${reading?`<span class="rdg">READING</span>`:`<span class="fin" title="Finished">✓</span>`}
       </div>
@@ -624,6 +633,8 @@ function renderCatchup(){
   }).join('');
   grid.querySelectorAll('[data-add]').forEach(btn=>btn.onclick=()=>addToLibrary(btn.dataset.add));
   grid.querySelectorAll('[data-fixcu]').forEach(btn=>btn.onclick=()=>clearCatchupCover(btn.dataset.fixcu));
+  grid.querySelectorAll('[data-amzcu]').forEach(btn=>btn.onclick=()=>amazonAndPasteCatchup(btn.dataset.amzcu));
+  grid.querySelectorAll('[data-delcu]').forEach(btn=>btn.onclick=()=>removeCatchup(btn.dataset.delcu));
 }
 
 function catchupCard(b){
@@ -632,7 +643,9 @@ function catchupCard(b){
   return `<div class="book">
       <div class="cover">
         ${b.cover?`<img src="${esc(b.cover)}" alt="">`:`<div class="placeholder">&</div>`}
+        <button class="del" data-delcu="${b.id}" title="Remove from catch-up">×</button>
         <button class="fixcover" data-fixcu="${b.id}" title="${b.cover?'Wrong cover? Replace or clear it':'Add a cover URL'}">⟳</button>
+        <button class="amzbtn" data-amzcu="${b.id}" title="Fix cover via Amazon">A</button>
         ${yr?`<span class="fmt" style="color:var(--paper-dim)">${yr}</span>`:''}
       </div>
       <div class="meta">
@@ -641,6 +654,35 @@ function catchupCard(b){
         <button class="statusbtn reading" data-add="${b.id}">+ Add to library</button>
       </div>
     </div>`;
+}
+
+// remove a book from catch-up
+async function removeCatchup(id){
+  if(!confirm('Remove from catch-up?'))return;
+  try{
+    await fetch(DB+'/catchup/'+id+'.json',{method:'DELETE'});
+    catchup=catchup.filter(x=>x.id!==id);
+    renderCatchup();
+    toast('Removed');
+  }catch(e){console.error(e);toast("Couldn't remove");}
+}
+
+// fix cover on a catch-up entry via Amazon search + paste
+async function amazonAndPasteCatchup(id){
+  const b=catchup.find(x=>x.id===id); if(!b)return;
+  const q=encodeURIComponent(b.title+' '+(b.author||'').split(',')[0]);
+  window.open('https://www.amazon.co.uk/s?k='+q+'&i=stripbooks','_blank');
+  await new Promise(r=>setTimeout(r,300));
+  const url=prompt('Find the book on Amazon, right-click the cover → "Copy image address", then paste here:','');
+  if(!url||!url.trim())return;
+  try{
+    const res=await fetch(DB+'/catchup/'+id+'.json',{method:'PATCH',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({cover:url.trim()})});
+    if(!res.ok)throw new Error('HTTP '+res.status);
+    b.cover=url.trim();
+    renderCatchup();
+    toast('Cover updated');
+  }catch(e){console.error(e);toast("Couldn't save");}
 }
 
 // fix cover on a catch-up entry (same prompt as library, writes to /catchup node)

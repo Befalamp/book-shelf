@@ -57,10 +57,6 @@ query BookSeries($title: String!) {
     title
     image { url }
     cached_image
-    editions(limit: 5, order_by: { users_count: desc_nulls_last }) {
-      isbn_10
-      isbn_13
-    }
     contributions(where: { contributable_type: { _eq: "Book" } }) {
       author { name }
     }
@@ -90,28 +86,17 @@ const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim
     return '';
   }
 
-  // convert ISBN-13 (978 prefix) to ISBN-10
-  function isbn13to10(isbn13) {
-    const clean = isbn13.replace(/[^0-9]/g, '');
-    if (clean.length !== 13 || !clean.startsWith('978')) return null;
-    const core = clean.slice(3, 12); // 9 digits
-    let sum = 0;
-    for (let i = 0; i < 9; i++) sum += parseInt(core[i]) * (10 - i);
-    const check = (11 - (sum % 11)) % 11;
-    return core + (check === 10 ? 'X' : String(check));
-  }
-
-  // get Amazon cover URL from Hardcover editions' ISBNs
-  function amazonCover(hb) {
-    if (!hb.editions || !hb.editions.length) return '';
-    for (const ed of hb.editions) {
-      if (ed.isbn_10) return `https://m.media-amazon.com/images/P/${ed.isbn_10}.jpg`;
-      if (ed.isbn_13) {
-        const isbn10 = isbn13to10(ed.isbn_13);
-        if (isbn10) return `https://m.media-amazon.com/images/P/${isbn10}.jpg`;
-      }
-    }
-    return '';
+  // Open Library: search by title+author, return a verified cover URL or ''
+  async function openLibraryCover(title, author) {
+    try {
+      const q = `title=${encodeURIComponent(title)}&author=${encodeURIComponent((author||'').split(',')[0])}`;
+      const res = await fetch(`https://openlibrary.org/search.json?${q}&fields=cover_i&limit=1`);
+      if (!res.ok) return '';
+      const data = await res.json();
+      const doc = data.docs && data.docs[0];
+      if (!doc || !doc.cover_i) return '';  // no cover_i = no cover exists
+      return `https://covers.openlibrary.org/b/id/${doc.cover_i}-L.jpg`;
+    } catch (e) { return ''; }
   }
 
   // Google Books fallback for covers Hardcover doesn't have
@@ -127,12 +112,18 @@ const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim
     } catch (e) { return ''; }
   }
 
-  // process any book missing a series OR needing a better cover (not already Amazon)
+  // process any book missing a series OR needing a verified cover
   const entries = Object.entries(booksRaw).filter(([id, b]) => {
     const needsSeries = !(b.series && b.series.trim());
-    const hasAmazonCover = b.cover && b.cover.includes('m.media-amazon.com');
-    const needsCover = !hasAmazonCover; // replace everything non-Amazon
-    if (!needsSeries && !needsCover) return false;
+    // keep covers from: Hardcover (hardcover.app), OL (covers.openlibrary.org), manually pasted amazon (media-amazon with /images/I/)
+    const goodCover = b.cover && (
+      b.cover.includes('hardcover.app') ||
+      b.cover.includes('covers.openlibrary.org') ||
+      b.cover.includes('openlibrary.org') ||
+      (b.cover.includes('media-amazon.com') && b.cover.includes('/images/I/')) ||  // manually pasted real amazon URLs
+      b.cover.includes('books.google')
+    );
+    if (!needsSeries && goodCover) return false;
     return true;
   });
 
@@ -169,11 +160,15 @@ const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim
       }
     }
 
-    // cover: Amazon via ISBN first, then Hardcover image, then Google Books
-    const hasAmazonCover = b.cover && b.cover.includes('m.media-amazon.com');
-    if (!hasAmazonCover) {
-      let cov = amazonCover(chosen);
-      if (!cov) cov = coverFrom(chosen);
+    // cover: Hardcover image → Open Library (verified) → Google Books
+    const goodCover = b.cover && (
+      b.cover.includes('hardcover.app') || b.cover.includes('openlibrary.org') ||
+      (b.cover.includes('media-amazon.com') && b.cover.includes('/images/I/')) ||
+      b.cover.includes('books.google')
+    );
+    if (!goodCover) {
+      let cov = coverFrom(chosen);
+      if (!cov) { cov = await openLibraryCover(b.title, b.author); await sleep(1100); }
       if (!cov) { cov = await googleCover(b.title, b.author); await sleep(1100); }
       if (cov) { patch.cover = cov; if (b.coverCleared) patch.coverCleared = null; }
     }

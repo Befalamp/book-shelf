@@ -1,45 +1,42 @@
 /**
- * Auto-Series (search pass) — typo-tolerant fill for books the exact-title
- * pass missed. Uses Hardcover's search endpoint (Typesense) which tolerates
- * punctuation/spelling differences, then reads series + cover from the top hit.
+ * Auto-Series — runs on a schedule via GitHub Actions (or manually).
+ * For every book on the shelf that has no series yet, asks Hardcover what
+ * series it belongs to (and its position), and writes that back to Firebase.
  *
- * Env: HARDCOVER_TOKEN, FIREBASE_DB_URL
- * Node 18+.
+ * Env vars (from GitHub secrets):
+ *   HARDCOVER_TOKEN  - personal access token
+ *   FIREBASE_DB_URL  - realtime database URL
+ *
+ * Node 18+ (global fetch). No npm dependencies.
  */
 
 const HC_TOKEN = process.env.HARDCOVER_TOKEN;
 const DB = (process.env.FIREBASE_DB_URL || '').replace(/\/$/, '');
 const HC_ENDPOINT = 'https://api.hardcover.app/v1/graphql';
-if (!HC_TOKEN || !DB) { console.error('Missing env vars'); process.exit(1); }
+
+if (!HC_TOKEN || !DB) { console.error('Missing HARDCOVER_TOKEN or FIREBASE_DB_URL'); process.exit(1); }
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
-const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
-async function hardcover(query, variables, retried) {
-  let res;
-  try {
-    res = await fetch(HC_ENDPOINT, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer ' + HC_TOKEN,
-        'User-Agent': 'book-shelf-auto-series-search (personal reading tracker)'
-      },
-      body: JSON.stringify({ query, variables })
-    });
-  } catch (e) {
-    if (!retried) { await sleep(2000); return hardcover(query, variables, true); }
-    throw e;
-  }
+async function hardcover(query, variables) {
+  const res = await fetch(HC_ENDPOINT, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': 'Bearer ' + HC_TOKEN,
+      'User-Agent': 'book-shelf-auto-series (personal reading tracker)'
+    },
+    body: JSON.stringify({ query, variables })
+  });
   if (res.status === 429) {
     const wait = parseInt(res.headers.get('Retry-After') || '10', 10);
     console.log(`Rate limited, waiting ${wait}s...`);
     await sleep(wait * 1000);
     return hardcover(query, variables);
   }
-  if (!res.ok) { console.error(`HC ${res.status}`, (await res.text()).slice(0, 300)); return null; }
+  if (!res.ok) { console.error(`HC ${res.status}`, await res.text()); return null; }
   const json = await res.json();
-  if (json.errors) { console.error('GraphQL errors:', JSON.stringify(json.errors).slice(0, 300)); return null; }
+  if (json.errors) { console.error('GraphQL errors:', JSON.stringify(json.errors)); return null; }
   return json.data;
 }
 
@@ -51,127 +48,160 @@ async function fbPatch(path, data) {
   return r.ok;
 }
 
-const SEARCH_QUERY = `
-query Search($q: String!) {
-  search(query: $q, query_type: "Book", per_page: 5, page: 1) { results }
+// Find a book by title, then read its featured series + position.
+// Matches loosely on title (exact), then checks an author contribution matches.
+const SERIES_QUERY = `
+query BookSeries($title: String!) {
+  books(where: { title: { _eq: $title }, book_status_id: { _eq: 1 } }, limit: 5) {
+    id
+    title
+    image { url }
+    cached_image
+    contributions(where: { contributable_type: { _eq: "Book" } }) {
+      author { name }
+    }
+    book_series {
+      position
+      series { name }
+    }
+  }
 }`;
 
-// pull hit documents out of the Typesense results blob (defensive — shape may vary)
-function hitsFrom(results) {
-  if (!results) return [];
-  let r = results;
-  if (typeof r === 'string') { try { r = JSON.parse(r); } catch (e) { return []; } }
-  const hits = r.hits || (r.results && r.results[0] && r.results[0].hits) || [];
-  return hits.map(h => h.document || h).filter(Boolean);
-}
+// normalise for author comparison
+const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 
-// find a cover url inside a hit document (tries the common shapes)
-function coverFromHit(doc) {
-  const img = doc.image || doc.cached_image || (doc.featured_series && doc.featured_series.image);
-  if (!img) return '';
-  if (typeof img === 'string') { try { const p = JSON.parse(img); return p.url || ''; } catch (e) { return img.startsWith('http') ? img : ''; } }
-  return img.url || '';
-}
-
-// Open Library: search by title+author, return a verified cover URL or ''
-async function openLibraryCover(title, author) {
-  try {
-    const q = `title=${encodeURIComponent(title)}&author=${encodeURIComponent((author||'').split(',')[0])}`;
-    const res = await fetch(`https://openlibrary.org/search.json?${q}&fields=cover_i&limit=1`);
-    if (!res.ok) return '';
-    const data = await res.json();
-    const doc = data.docs && data.docs[0];
-    if (!doc || !doc.cover_i) return '';
-    return `https://covers.openlibrary.org/b/id/${doc.cover_i}-L.jpg`;
-  } catch (e) { return ''; }
-}
-
-// Google Books fallback
-async function googleCover(title, author) {
-  try {
-    const q = encodeURIComponent(`${title} ${(author||'').split(',')[0]}`);
-    const res = await fetch(`https://www.googleapis.com/books/v1/volumes?maxResults=1&q=${q}`);
-    if (!res.ok) return '';
-    const data = await res.json();
-    const v = data.items && data.items[0] && data.items[0].volumeInfo;
-    const img = v && v.imageLinks && (v.imageLinks.thumbnail || v.imageLinks.smallThumbnail);
-    return img ? img.replace('http://','https://').replace('&edge=curl','') : '';
-  } catch (e) { return ''; }
+// strip Audible-style suffixes that other databases don't use
+function cleanTitle(t) {
+  return String(t || '')
+    .replace(/,\s*Book\s*\d+$/i, '')           // ", Book 2"
+    .replace(/:\s*A\s+[\w\s]+(?:Thriller|Mystery|Novel)$/i, '')  // ": A Scottish Crime Thriller"
+    .replace(/:\s*An\s+[\w\s]+(?:Thriller|Mystery|Novel)$/i, '') // ": An Alexander Gregory Thriller"
+    .replace(/:\s*Books?\s*\d[\d\-]*$/i, '')    // ": Books 1-3"
+    .replace(/,\s*Books?\s*\d[\d\-]*$/i, '')    // ", Books 1-3"
+    .trim();
 }
 
 (async () => {
   const booksRaw = await fbGet('books');
-  if (!booksRaw) { console.log('No books.'); return; }
+  if (!booksRaw) { console.log('No books in Firebase.'); return; }
 
+  // helper: pull a usable cover URL out of the Hardcover book record
+  function coverFrom(hb) {
+    if (hb.image && hb.image.url) return hb.image.url;
+    if (hb.cached_image) {
+      try {
+        const c = typeof hb.cached_image === 'string' ? JSON.parse(hb.cached_image) : hb.cached_image;
+        if (c && c.url) return c.url;
+      } catch (e) {}
+    }
+    // diagnostic: log what we got so we can fix the parser
+    console.log(`    [cover-debug] ${hb.title}: image=${JSON.stringify(hb.image)}, cached_image=${JSON.stringify(hb.cached_image)?.slice(0,150)}`);
+    return '';
+  }
+
+  // Open Library: search by title+author, return a verified cover URL or ''
+  async function openLibraryCover(title, author) {
+    try {
+      const q = `title=${encodeURIComponent(title)}&author=${encodeURIComponent((author||'').split(',')[0])}`;
+      const res = await fetch(`https://openlibrary.org/search.json?${q}&fields=cover_i&limit=1`);
+      if (!res.ok) return '';
+      const data = await res.json();
+      const doc = data.docs && data.docs[0];
+      if (!doc || !doc.cover_i) return '';  // no cover_i = no cover exists
+      return `https://covers.openlibrary.org/b/id/${doc.cover_i}-L.jpg`;
+    } catch (e) { return ''; }
+  }
+
+  // Google Books fallback for covers Hardcover doesn't have
+  async function googleCover(title, author) {
+    try {
+      const q = encodeURIComponent(`${title} ${(author||'').split(',')[0]}`);
+      const res = await fetch(`https://www.googleapis.com/books/v1/volumes?maxResults=1&q=${q}`);
+      if (!res.ok) return '';
+      const data = await res.json();
+      const v = data.items && data.items[0] && data.items[0].volumeInfo;
+      const img = v && v.imageLinks && (v.imageLinks.thumbnail || v.imageLinks.smallThumbnail);
+      return img ? img.replace('http://','https://').replace('&edge=curl','') : '';
+    } catch (e) { return ''; }
+  }
+
+  // process any book missing a series OR needing a verified cover
   const entries = Object.entries(booksRaw).filter(([id, b]) => {
     const needsSeries = !(b.series && b.series.trim());
+    // keep covers from: Hardcover (hardcover.app), OL (covers.openlibrary.org), manually pasted amazon (media-amazon with /images/I/)
     const goodCover = b.cover && (
-      b.cover.includes('hardcover.app') || b.cover.includes('openlibrary.org') ||
-      (b.cover.includes('media-amazon.com') && b.cover.includes('/images/I/')) ||
+      b.cover.includes('hardcover.app') ||
+      b.cover.includes('covers.openlibrary.org') ||
+      b.cover.includes('openlibrary.org') ||
+      (b.cover.includes('media-amazon.com') && b.cover.includes('/images/I/')) ||  // manually pasted real amazon URLs
       b.cover.includes('books.google')
     );
     if (!needsSeries && goodCover) return false;
     return true;
   });
-  console.log(`${entries.length} books still need series and/or cover (search pass)...`);
-  let seriesFilled = 0, coversFilled = 0, noHit = 0;
+
+  console.log(`${entries.length} books need a series and/or cover...`);
+  let seriesFilled = 0, coversFilled = 0;
 
   for (const [id, b] of entries) {
-   try {
-    const q = `${b.title} ${(b.author || '').split(',')[0]}`.trim();
-    const data = await hardcover(SEARCH_QUERY, { q });
-    await sleep(1300); // search bucket is stricter; pace gently
+    // try exact title first, then cleaned (without Audible suffixes)
+    let data = await hardcover(SERIES_QUERY, { title: b.title });
+    await sleep(1100);
+    const cleaned = cleanTitle(b.title);
+    if ((!data || !data.books || !data.books.length) && cleaned !== b.title) {
+      data = await hardcover(SERIES_QUERY, { title: cleaned });
+      await sleep(1100);
+    }
+    if (!data || !data.books || !data.books.length) continue;
 
-    const hits = data ? hitsFrom(data.search && data.search.results) : [];
-    if (!hits.length) { noHit++; continue; }
-
-    // choose the hit whose author matches ours (fallback: first hit)
     const myAuthor = norm((b.author || '').split(',')[0]);
-    let doc = hits.find(h => {
-      const names = [].concat(h.author_names || []).map(norm);
-      return !myAuthor || names.some(n => n && (n.includes(myAuthor) || myAuthor.includes(n)));
-    }) || hits[0];
+    // pick the best matching book record (author matches; prefer one with a series)
+    let match = null, fallback = null;
+    for (const hb of data.books) {
+      const authors = (hb.contributions || []).map(c => norm(c.author && c.author.name));
+      const authorOk = !myAuthor || authors.some(a => a && (a.includes(myAuthor) || myAuthor.includes(a)));
+      if (!authorOk) continue;
+      if (!fallback) fallback = hb;
+      if (hb.book_series && hb.book_series.length) { match = hb; break; }
+    }
+    const chosen = match || fallback;
+    if (!chosen) continue;
 
     const patch = {};
-    const isBoxset = /boxset|collection|books \d|vol\.|part (one|two|three)/i.test(b.title || '');
 
-    // series
-    if (!(b.series && b.series.trim()) && !isBoxset) {
-      const sName = (doc.featured_series && doc.featured_series.series_name)
-        || (Array.isArray(doc.series_names) ? doc.series_names[0] : doc.series_names);
-      if (sName) {
-        patch.series = sName;
-        const pos = doc.featured_series_position != null ? doc.featured_series_position
-                  : (doc.featured_series && doc.featured_series.position);
-        if (pos != null) patch.seriesNum = pos;
+    // series (only if we don't already have one, and this is a boxset-safe title)
+    const isBoxset = /boxset|collection|books \d|vol\.|part (one|two|three)/i.test(b.title || '');
+    if (!(b.series && b.series.trim()) && !isBoxset && chosen.book_series && chosen.book_series.length) {
+      const bs = chosen.book_series[0];
+      if (bs.series && bs.series.name) {
+        patch.series = bs.series.name;
+        if (bs.position != null) patch.seriesNum = bs.position;
       }
     }
 
-    // cover: Hardcover hit → Open Library (verified) → Google Books
+    // cover: Hardcover image → Open Library (verified) → Google Books
     const goodCover = b.cover && (
       b.cover.includes('hardcover.app') || b.cover.includes('openlibrary.org') ||
       (b.cover.includes('media-amazon.com') && b.cover.includes('/images/I/')) ||
       b.cover.includes('books.google')
     );
     if (!goodCover) {
-      let cov = coverFromHit(doc);
-      if (!cov) { cov = await openLibraryCover(b.title, b.author); await sleep(1100); }
-      if (!cov) { cov = await googleCover(b.title, b.author); await sleep(1100); }
+      let cov = coverFrom(chosen);
+      let src = cov ? 'hardcover' : '';
+      if (!cov) { cov = await openLibraryCover(cleanTitle(b.title), b.author); await sleep(1100); src = cov ? 'openlibrary' : ''; }
+      if (!cov) { cov = await googleCover(cleanTitle(b.title), b.author); await sleep(1100); src = cov ? 'google' : ''; }
       if (cov) { patch.cover = cov; if (b.coverCleared) patch.coverCleared = null; }
+      else { console.log(`    [no-cover] ${b.title} — all 3 sources failed`); }
     }
 
     if (!Object.keys(patch).length) continue;
     const ok = await fbPatch('books/' + id, patch);
     if (ok) {
-      if (patch.series) seriesFilled++;
-      if (patch.cover) coversFilled++;
-      console.log(`  ${b.title}${patch.series ? ' → ' + patch.series + (patch.seriesNum != null ? ' #' + patch.seriesNum : '') : ''}${patch.cover ? ' [cover]' : ''}`);
+      if (patch.series) { seriesFilled++; }
+      if (patch.cover) { coversFilled++; }
+      console.log(`  ${b.title}${patch.series ? ' → ' + patch.series + (patch.seriesNum!=null?' #'+patch.seriesNum:'') : ''}${patch.cover ? ' [cover]' : ''}`);
     }
-   } catch (e) {
-    console.log(`  (skipped ${b.title}: ${e.code || e.message})`);
-    await sleep(2000); // brief pause after a network hiccup
-   }
   }
 
-  console.log(`Done. Series: +${seriesFilled}, covers: +${coversFilled}, no match: ${noHit}, of ${entries.length}.`);
+  console.log(`Done. Series filled: ${seriesFilled}, covers filled: ${coversFilled}, of ${entries.length} checked.`);
 })().catch(e => { console.error(e); process.exit(1); });

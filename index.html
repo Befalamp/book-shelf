@@ -139,8 +139,8 @@
   .statusbtn.done{background:rgba(124,154,114,.14);border-color:var(--sage);color:var(--sage)}
   .statusbtn.done:hover{background:var(--sage);color:var(--ink)}
   .amzlink{
-    display:block;text-align:center;margin-top:.3rem;font-size:.7rem;color:var(--gilt-soft);
-    text-decoration:none;font-weight:500;
+    display:block;width:100%;text-align:center;margin-top:.3rem;font-size:.7rem;color:var(--gilt-soft);
+    background:transparent;border:none;cursor:pointer;font-family:'Inter',sans-serif;font-weight:500;
   }
   .amzlink:hover{color:var(--gilt);text-decoration:underline}
   .cover .fin{
@@ -498,7 +498,7 @@ function card(b){
         <div class="t" title="${esc(b.title)}">${num}${esc(b.title)}</div>
         <div class="a">${esc(b.author)}</div>
         <button class="statusbtn ${reading?'reading':'done'}" data-toggle="${b.id}">${reading?'Mark finished':'✓ Finished'}</button>
-        ${showingMissing?`<a class="amzlink" href="https://www.amazon.co.uk/s?k=${encodeURIComponent(b.title+' '+b.author)}&i=stripbooks" target="_blank">Search Amazon →</a>`:''}
+        ${showingMissing?`<button class="amzlink" data-amz="${b.id}">Search Amazon →</button>`:''}
       </div>
     </div>`;
 }
@@ -511,7 +511,7 @@ function renderBooks(){
   // filter to missing covers if active
   let pool = books;
   if(showingMissing){
-    pool = books.filter(b=>!b.cover || b.cover.includes('/images/P/'));
+    pool = books.filter(b=>!b.cover || !b.cover.trim());
     document.getElementById('n').textContent=pool.length+' missing';
     if(!pool.length){grid.innerHTML='<div class="empty">All books have covers!</div>';return;}
   }
@@ -569,6 +569,7 @@ function renderBooks(){
   grid.querySelectorAll('[data-toggle]').forEach(btn=>btn.onclick=()=>toggleStatus(btn.dataset.toggle));
   grid.querySelectorAll('[data-fix]').forEach(btn=>btn.onclick=()=>clearCover(btn.dataset.fix));
   grid.querySelectorAll('[data-edit]').forEach(btn=>btn.onclick=()=>openEdit(btn.dataset.edit));
+  grid.querySelectorAll('[data-amz]').forEach(btn=>btn.onclick=()=>amazonAndPaste(btn.dataset.amz));
 }
 
 function releaseKey(r){ return (r.author+'_'+r.title).toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'').slice(0,180); }
@@ -877,6 +878,25 @@ document.getElementById('save').onclick=async()=>{
     btn.disabled=false;btn.textContent='Add to shelf';
   }
 };
+
+// open Amazon search + immediately show paste prompt so it's waiting when you switch back
+async function amazonAndPaste(id){
+  const b=books.find(x=>x.id===id); if(!b)return;
+  const q=encodeURIComponent(b.title+' '+(b.author||'').split(',')[0]);
+  window.open('https://www.amazon.co.uk/s?k='+q+'&i=stripbooks','_blank');
+  // small delay so the new tab opens before prompt blocks
+  await new Promise(r=>setTimeout(r,300));
+  const url=prompt('Find the book on Amazon, right-click the cover → "Copy image address", then paste here:','');
+  if(!url||!url.trim())return;
+  try{
+    const res=await fetch(DB+'/books/'+id+'.json',{method:'PATCH',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({cover:url.trim()})});
+    if(!res.ok)throw new Error('HTTP '+res.status);
+    b.cover=url.trim();
+    renderBooks();
+    toast('Cover updated');
+  }catch(e){console.error(e);toast("Couldn't save");}
+}
 
 // wrong cover: paste a replacement URL, or leave blank to clear + let Hardcover refill next sync
 async function clearCover(id){

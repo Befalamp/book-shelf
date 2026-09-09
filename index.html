@@ -635,6 +635,7 @@ function renderCatchup(){
   grid.querySelectorAll('[data-fixcu]').forEach(btn=>btn.onclick=()=>clearCatchupCover(btn.dataset.fixcu));
   grid.querySelectorAll('[data-amzcu]').forEach(btn=>btn.onclick=()=>amazonAndPasteCatchup(btn.dataset.amzcu));
   grid.querySelectorAll('[data-delcu]').forEach(btn=>btn.onclick=()=>removeCatchup(btn.dataset.delcu));
+  grid.querySelectorAll('[data-editcu]').forEach(btn=>btn.onclick=()=>openEditCatchup(btn.dataset.editcu));
 }
 
 function catchupCard(b){
@@ -646,6 +647,7 @@ function catchupCard(b){
         <button class="del" data-delcu="${b.id}" title="Remove from catch-up">×</button>
         <button class="fixcover" data-fixcu="${b.id}" title="${b.cover?'Wrong cover? Replace or clear it':'Add a cover URL'}">⟳</button>
         <button class="amzbtn" data-amzcu="${b.id}" title="Fix cover via Amazon">A</button>
+        <button class="editbtn" data-editcu="${b.id}" title="Edit series/number">✎</button>
         ${yr?`<span class="fmt" style="color:var(--paper-dim)">${yr}</span>`:''}
       </div>
       <div class="meta">
@@ -654,6 +656,19 @@ function catchupCard(b){
         <button class="statusbtn reading" data-add="${b.id}">+ Add to library</button>
       </div>
     </div>`;
+}
+
+// edit a catch-up entry (reuses the edit modal, saves to /catchup)
+let editingCatchupId=null;
+function openEditCatchup(id){
+  const b=catchup.find(x=>x.id===id); if(!b)return;
+  editingCatchupId=id; editingId=null; // clear library edit
+  document.getElementById('e-title').value=b.title||'';
+  document.getElementById('e-author').value=b.author||'';
+  document.getElementById('e-series').value=b.series||'';
+  document.getElementById('e-num').value=(b.seriesNum!=null?b.seriesNum:'');
+  document.getElementById('e-isbn').value='';
+  editOverlay.classList.add('on');
 }
 
 // remove a book from catch-up
@@ -745,11 +760,14 @@ function openEdit(id){
   document.getElementById('e-isbn').value=b.isbn||'';
   editOverlay.classList.add('on');
 }
-document.getElementById('e-cancel').onclick=()=>{editOverlay.classList.remove('on');editingId=null;};
-editOverlay.onclick=e=>{if(e.target===editOverlay){editOverlay.classList.remove('on');editingId=null;}};
+document.getElementById('e-cancel').onclick=()=>{editOverlay.classList.remove('on');editingId=null;editingCatchupId=null;};
+editOverlay.onclick=e=>{if(e.target===editOverlay){editOverlay.classList.remove('on');editingId=null;editingCatchupId=null;}};
 document.getElementById('e-save').onclick=async()=>{
-  if(!editingId)return;
-  const b=books.find(x=>x.id===editingId); if(!b)return;
+  const isCatchup = !!editingCatchupId;
+  const id = isCatchup ? editingCatchupId : editingId;
+  if(!id)return;
+  const b = isCatchup ? catchup.find(x=>x.id===id) : books.find(x=>x.id===id);
+  if(!b)return;
   const patch={
     title:document.getElementById('e-title').value.trim(),
     author:document.getElementById('e-author').value.trim(),
@@ -760,7 +778,7 @@ document.getElementById('e-save').onclick=async()=>{
   // ISBN → Amazon cover
   const isbnRaw=document.getElementById('e-isbn').value.trim().replace(/[^0-9Xx]/g,'');
   if(isbnRaw){
-    patch.isbn=isbnRaw;  // store it
+    patch.isbn=isbnRaw;
     let isbn10=isbnRaw;
     if(isbnRaw.length===13 && isbnRaw.startsWith('978')){
       const core=isbnRaw.slice(3,12);
@@ -768,7 +786,6 @@ document.getElementById('e-save').onclick=async()=>{
       const chk=(11-(sum%11))%11;
       isbn10=core+(chk===10?'X':String(chk));
     } else if(isbnRaw.length===13 && isbnRaw.startsWith('979')){
-      // 979 prefix can't convert to ISBN-10 — try the 13 directly
       isbn10=null;
     }
     if(isbn10 && isbn10.length===10){
@@ -777,15 +794,16 @@ document.getElementById('e-save').onclick=async()=>{
       toast('979-prefix ISBN — no Amazon cover available. Use ⟳ to paste a URL instead.');
     }
   }
+  const node = isCatchup ? 'catchup' : 'books';
   const btn=document.getElementById('e-save');
   btn.disabled=true;btn.textContent='Saving…';
   try{
-    const res=await fetch(DB+'/books/'+editingId+'.json',{method:'PATCH',
+    const res=await fetch(DB+'/'+node+'/'+id+'.json',{method:'PATCH',
       headers:{'Content-Type':'application/json'},body:JSON.stringify(patch)});
     if(!res.ok)throw new Error('HTTP '+res.status);
     Object.assign(b,patch);
-    renderBooks();
-    editOverlay.classList.remove('on');editingId=null;
+    if(isCatchup) renderCatchup(); else renderBooks();
+    editOverlay.classList.remove('on');editingId=null;editingCatchupId=null;
     toast('Updated');
   }catch(e){console.error(e);toast("Couldn't save");}
   finally{btn.disabled=false;btn.textContent='Save';}

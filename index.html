@@ -406,6 +406,7 @@
       <div class="field"><label>Series</label><input id="e-series" type="text" placeholder="Leave blank for standalone" autocomplete="off"></div>
       <div class="field"><label>Number in series</label><input id="e-num" type="number" min="0" autocomplete="off"></div>
     </div>
+    <div class="field"><label>ISBN (10 or 13 — auto-fetches Amazon cover)</label><input id="e-isbn" type="text" placeholder="e.g. 0241988268" autocomplete="off"></div>
     <div class="actions">
       <button class="btn-cancel" id="e-cancel">Cancel</button>
       <button class="btn-save" id="e-save">Save</button>
@@ -658,6 +659,7 @@ function openEdit(id){
   document.getElementById('e-author').value=b.author||'';
   document.getElementById('e-series').value=b.series||'';
   document.getElementById('e-num').value=(b.seriesNum!=null?b.seriesNum:'');
+  document.getElementById('e-isbn').value='';
   editOverlay.classList.add('on');
 }
 document.getElementById('e-cancel').onclick=()=>{editOverlay.classList.remove('on');editingId=null;};
@@ -672,6 +674,18 @@ document.getElementById('e-save').onclick=async()=>{
     seriesNum:parseInt(document.getElementById('e-num').value)||null
   };
   if(patch.series===''&&patch.seriesNum) patch.seriesNum=null;
+  // ISBN → Amazon cover
+  const isbnRaw=document.getElementById('e-isbn').value.trim().replace(/[^0-9Xx]/g,'');
+  if(isbnRaw){
+    let isbn10=isbnRaw;
+    if(isbnRaw.length===13 && isbnRaw.startsWith('978')){
+      const core=isbnRaw.slice(3,12);
+      let sum=0; for(let i=0;i<9;i++) sum+=parseInt(core[i])*(10-i);
+      const chk=(11-(sum%11))%11;
+      isbn10=core+(chk===10?'X':String(chk));
+    }
+    if(isbn10.length===10) patch.cover='https://m.media-amazon.com/images/P/'+isbn10+'.jpg';
+  }
   const btn=document.getElementById('e-save');
   btn.disabled=true;btn.textContent='Saving…';
   try{

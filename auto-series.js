@@ -57,6 +57,10 @@ query BookSeries($title: String!) {
     title
     image { url }
     cached_image
+    editions(limit: 3, order_by: { users_count: desc_nulls_last }) {
+      image { url }
+      cached_image
+    }
     contributions(where: { contributable_type: { _eq: "Book" } }) {
       author { name }
     }
@@ -85,17 +89,31 @@ function cleanTitle(t) {
   const booksRaw = await fbGet('books');
   if (!booksRaw) { console.log('No books in Firebase.'); return; }
 
-  // helper: pull a usable cover URL out of the Hardcover book record
-  function coverFrom(hb) {
-    if (hb.image && hb.image.url) return hb.image.url;
-    if (hb.cached_image) {
+  // helper: extract a cover URL from image/cached_image fields
+  function imageFrom(obj) {
+    if (obj.image && obj.image.url) return obj.image.url;
+    if (obj.cached_image && typeof obj.cached_image === 'object' && Object.keys(obj.cached_image).length > 0) {
       try {
-        const c = typeof hb.cached_image === 'string' ? JSON.parse(hb.cached_image) : hb.cached_image;
+        const c = typeof obj.cached_image === 'string' ? JSON.parse(obj.cached_image) : obj.cached_image;
         if (c && c.url) return c.url;
       } catch (e) {}
     }
-    // diagnostic: log what we got so we can fix the parser
-    console.log(`    [cover-debug] ${hb.title}: image=${JSON.stringify(hb.image)}, cached_image=${JSON.stringify(hb.cached_image)?.slice(0,150)}`);
+    if (obj.cached_image && typeof obj.cached_image === 'string' && obj.cached_image.startsWith('http')) return obj.cached_image;
+    return '';
+  }
+
+  // pull cover from book record first, then try its editions
+  function coverFrom(hb) {
+    let cov = imageFrom(hb);
+    if (cov) return cov;
+    // try editions
+    if (hb.editions && hb.editions.length) {
+      for (const ed of hb.editions) {
+        cov = imageFrom(ed);
+        if (cov) return cov;
+      }
+    }
+    console.log(`    [cover-debug] ${hb.title}: book image empty, ${hb.editions ? hb.editions.length : 0} editions checked`);
     return '';
   }
 

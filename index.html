@@ -3,6 +3,9 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#161b21">
+<link rel="apple-touch-icon" href="icon-192.png">
 <title>Shelf</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -244,6 +247,14 @@
     backdrop-filter:blur(2px);z-index:2;
   }
   .cover:hover .fixcover{display:flex}
+  .book .editbtn{
+    position:absolute;bottom:.5rem;right:.5rem;width:24px;height:24px;border-radius:50%;
+    background:rgba(22,27,33,.82);color:var(--paper-dim);border:none;cursor:pointer;
+    font-size:.85rem;line-height:1;display:none;align-items:center;justify-content:center;
+    backdrop-filter:blur(2px);z-index:2;
+  }
+  .cover:hover .editbtn{display:flex}
+  .editbtn:hover{color:var(--gilt)}
   .cover:hover .del{display:flex}
   .toast{
     position:fixed;bottom:2rem;left:50%;transform:translateX(-50%) translateY(160%);
@@ -386,6 +397,22 @@
 
 <div class="toast" id="toast"></div>
 
+<div class="overlay" id="editoverlay">
+  <div class="modal">
+    <h2>Edit <em>book</em></h2>
+    <div class="field"><label>Title</label><input id="e-title" type="text" autocomplete="off"></div>
+    <div class="field"><label>Author</label><input id="e-author" type="text" autocomplete="off"></div>
+    <div class="row2">
+      <div class="field"><label>Series</label><input id="e-series" type="text" placeholder="Leave blank for standalone" autocomplete="off"></div>
+      <div class="field"><label>Number in series</label><input id="e-num" type="number" min="0" autocomplete="off"></div>
+    </div>
+    <div class="actions">
+      <button class="btn-cancel" id="e-cancel">Cancel</button>
+      <button class="btn-save" id="e-save">Save</button>
+    </div>
+  </div>
+</div>
+
 <script>
 /* ============ CONFIG ============ */
 const DB = 'https://book-shelf-6fdb0-default-rtdb.europe-west1.firebasedatabase.app';
@@ -453,6 +480,7 @@ function card(b){
         ${b.cover?`<img src="${esc(b.cover)}" alt="">`:`<div class="placeholder">&</div>`}
         <button class="del" data-id="${b.id}" title="Remove">×</button>
         <button class="fixcover" data-fix="${b.id}" title="${b.cover?'Wrong cover? Replace or clear it':'Add a cover URL'}">⟳</button>
+        <button class="editbtn" data-edit="${b.id}" title="Edit series/number">✎</button>
         <span class="fmt ${b.format}">${b.format==='audio'?'AUDIO':'PRINT'}</span>
         ${reading?`<span class="rdg">READING</span>`:`<span class="fin" title="Finished">✓</span>`}
       </div>
@@ -521,6 +549,7 @@ function renderBooks(){
   grid.querySelectorAll('.del').forEach(btn=>btn.onclick=()=>removeBook(btn.dataset.id));
   grid.querySelectorAll('[data-toggle]').forEach(btn=>btn.onclick=()=>toggleStatus(btn.dataset.toggle));
   grid.querySelectorAll('[data-fix]').forEach(btn=>btn.onclick=()=>clearCover(btn.dataset.fix));
+  grid.querySelectorAll('[data-edit]').forEach(btn=>btn.onclick=()=>openEdit(btn.dataset.edit));
 }
 
 function releaseKey(r){ return (r.author+'_'+r.title).toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'').slice(0,180); }
@@ -618,6 +647,44 @@ document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{
   document.getElementById(t.dataset.v).classList.add('on');
   if(t.dataset.v==='radar') loadAuthors();   // refresh follow list when opening radar
 });
+
+// edit book details
+let editingId=null;
+const editOverlay=document.getElementById('editoverlay');
+function openEdit(id){
+  const b=books.find(x=>x.id===id); if(!b)return;
+  editingId=id;
+  document.getElementById('e-title').value=b.title||'';
+  document.getElementById('e-author').value=b.author||'';
+  document.getElementById('e-series').value=b.series||'';
+  document.getElementById('e-num').value=(b.seriesNum!=null?b.seriesNum:'');
+  editOverlay.classList.add('on');
+}
+document.getElementById('e-cancel').onclick=()=>{editOverlay.classList.remove('on');editingId=null;};
+editOverlay.onclick=e=>{if(e.target===editOverlay){editOverlay.classList.remove('on');editingId=null;}};
+document.getElementById('e-save').onclick=async()=>{
+  if(!editingId)return;
+  const b=books.find(x=>x.id===editingId); if(!b)return;
+  const patch={
+    title:document.getElementById('e-title').value.trim(),
+    author:document.getElementById('e-author').value.trim(),
+    series:document.getElementById('e-series').value.trim(),
+    seriesNum:parseInt(document.getElementById('e-num').value)||null
+  };
+  if(patch.series===''&&patch.seriesNum) patch.seriesNum=null;
+  const btn=document.getElementById('e-save');
+  btn.disabled=true;btn.textContent='Saving…';
+  try{
+    const res=await fetch(DB+'/books/'+editingId+'.json',{method:'PATCH',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify(patch)});
+    if(!res.ok)throw new Error('HTTP '+res.status);
+    Object.assign(b,patch);
+    renderBooks();
+    editOverlay.classList.remove('on');editingId=null;
+    toast('Updated');
+  }catch(e){console.error(e);toast("Couldn't save");}
+  finally{btn.disabled=false;btn.textContent='Save';}
+};
 
 // catch-up manual add
 document.getElementById('addcatchup').onclick=()=>{

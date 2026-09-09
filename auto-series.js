@@ -57,6 +57,10 @@ query BookSeries($title: String!) {
     title
     image { url }
     cached_image
+    default_cover_edition {
+      image { url }
+      cached_image
+    }
     editions(limit: 3, order_by: { users_count: desc_nulls_last }) {
       image { url }
       cached_image
@@ -102,18 +106,23 @@ function cleanTitle(t) {
     return '';
   }
 
-  // pull cover from book record first, then try its editions
+  // pull cover from book → default_cover_edition → any edition
   function coverFrom(hb) {
     let cov = imageFrom(hb);
     if (cov) return cov;
-    // try editions
+    // try the specific edition Hardcover uses for its cover
+    if (hb.default_cover_edition) {
+      cov = imageFrom(hb.default_cover_edition);
+      if (cov) return cov;
+    }
+    // try other editions
     if (hb.editions && hb.editions.length) {
       for (const ed of hb.editions) {
         cov = imageFrom(ed);
         if (cov) return cov;
       }
     }
-    console.log(`    [cover-debug] ${hb.title}: book image empty, ${hb.editions ? hb.editions.length : 0} editions checked`);
+    console.log(`    [cover-debug] ${hb.title}: all HC image fields empty`);
     return '';
   }
 

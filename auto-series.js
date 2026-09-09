@@ -57,6 +57,10 @@ query BookSeries($title: String!) {
     title
     image { url }
     cached_image
+    editions(limit: 5, order_by: { users_count: desc_nulls_last }) {
+      isbn_10
+      isbn_13
+    }
     contributions(where: { contributable_type: { _eq: "Book" } }) {
       author { name }
     }
@@ -86,6 +90,30 @@ const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim
     return '';
   }
 
+  // convert ISBN-13 (978 prefix) to ISBN-10
+  function isbn13to10(isbn13) {
+    const clean = isbn13.replace(/[^0-9]/g, '');
+    if (clean.length !== 13 || !clean.startsWith('978')) return null;
+    const core = clean.slice(3, 12); // 9 digits
+    let sum = 0;
+    for (let i = 0; i < 9; i++) sum += parseInt(core[i]) * (10 - i);
+    const check = (11 - (sum % 11)) % 11;
+    return core + (check === 10 ? 'X' : String(check));
+  }
+
+  // get Amazon cover URL from Hardcover editions' ISBNs
+  function amazonCover(hb) {
+    if (!hb.editions || !hb.editions.length) return '';
+    for (const ed of hb.editions) {
+      if (ed.isbn_10) return `https://m.media-amazon.com/images/P/${ed.isbn_10}.jpg`;
+      if (ed.isbn_13) {
+        const isbn10 = isbn13to10(ed.isbn_13);
+        if (isbn10) return `https://m.media-amazon.com/images/P/${isbn10}.jpg`;
+      }
+    }
+    return '';
+  }
+
   // Google Books fallback for covers Hardcover doesn't have
   async function googleCover(title, author) {
     try {
@@ -99,10 +127,11 @@ const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim
     } catch (e) { return ''; }
   }
 
-  // process any book missing a series OR missing a cover
+  // process any book missing a series OR needing a better cover (not already Amazon)
   const entries = Object.entries(booksRaw).filter(([id, b]) => {
     const needsSeries = !(b.series && b.series.trim());
-    const needsCover = !(b.cover && b.cover.trim()) || b.cover.includes('od-cdn.com');
+    const hasAmazonCover = b.cover && b.cover.includes('m.media-amazon.com');
+    const needsCover = !hasAmazonCover; // replace everything non-Amazon
     if (!needsSeries && !needsCover) return false;
     return true;
   });
@@ -140,10 +169,11 @@ const norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim
       }
     }
 
-    // cover (if empty or a dead od-cdn URL)
-    if (!(b.cover && b.cover.trim()) || b.cover.includes('od-cdn.com')) {
-      let cov = coverFrom(chosen);
-      // fallback: Google Books server-side (different IP from browser, fresh rate limit)
+    // cover: Amazon via ISBN first, then Hardcover image, then Google Books
+    const hasAmazonCover = b.cover && b.cover.includes('m.media-amazon.com');
+    if (!hasAmazonCover) {
+      let cov = amazonCover(chosen);
+      if (!cov) cov = coverFrom(chosen);
       if (!cov) { cov = await googleCover(b.title, b.author); await sleep(1100); }
       if (cov) { patch.cover = cov; if (b.coverCleared) patch.coverCleared = null; }
     }
